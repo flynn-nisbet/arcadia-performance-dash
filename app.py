@@ -199,15 +199,24 @@ def apply_dark_theme(fig, **extra):
 # ── Load data ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl="24h")
 def load_data():
-    path = "agent_calls_data.csv"
-    df = pd.read_csv(path)
+    data_dir = "data/"
+    files = [f for f in os.listdir(data_dir) if f.startswith("agent_calls_") and f.endswith(".csv")]
+    
+    if not files:
+        raise FileNotFoundError("No monthly CSV files found in data/")
+    
+    dfs = []
+    for f in sorted(files):
+        dfs.append(pd.read_csv(os.path.join(data_dir, f)))
+    
+    df = pd.concat(dfs, ignore_index=True)
     df["call_date_est"] = pd.to_datetime(df["call_date_est"])
     return df
 
 try:
     df_raw = load_data()
-except FileNotFoundError:
-    st.error("agent_calls_data.csv not found. Make sure the data pipeline has run.")
+except Exception as e:
+    st.error(f"Failed to load data: {e}")
     st.stop()
 
 # ── Sidebar Filters ────────────────────────────────────────────────────────────

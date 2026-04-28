@@ -2,8 +2,6 @@ from databricks.connect import DatabricksSession
 from datetime import date
 import pandas as pd
 
-OUTPUT_PATH = "/Workspace/Users/fnisbet@redventures.com/arcadia-performance-dash/agent_calls_data.csv"
-
 def get_data():
     spark = DatabricksSession.builder \
         .host("redventures-rv-energy-prod-production-9xwiei.cloud.databricks.com") \
@@ -195,6 +193,14 @@ def get_data():
 
 if __name__ == "__main__":
     df = get_data()
-    df.to_csv(OUTPUT_PATH, index=False)
-    print(f"Saved {len(df):,} rows to {OUTPUT_PATH}")
+    
+    OUTPUT_DIR = "/Workspace/Users/fnisbet@redventures.com/arcadia-performance-dash/data/"
+    
+    df["call_date_est"] = pd.to_datetime(df["call_date_est"])
+    
+    for month, group in df.groupby(df["call_date_est"].dt.to_period("M")):
+        filename = f"agent_calls_{month}.csv"
+        path = OUTPUT_DIR + filename
+        group.to_csv(path, index=False)
+        print(f"Saved {len(group):,} rows to {path}")
     
