@@ -1,0 +1,89 @@
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env/
+.python-version
+
+# ── Env & secrets (never commit) ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# ── Test / coverage / quality ────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+cython_debug/
+
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Databricks / Spark (local) ──────────────────────────────────────────────
+.databricks/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# ── IDEs & editors ───────────────────────────────────────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code — uncomment if you don’t want workspace settings in git
+# .vscode/
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Logs & temp ─────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ── Optional: large or sensitive data (uncomment if needed) ─────────────────
+# data/*.csv
+# data/*.parquet

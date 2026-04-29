@@ -1,8 +1,11 @@
 import streamlit as st
+import streamlit.components.v1 as st_components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import json
 import os
+import hashlib
 from datetime import timedelta, date
 
 st.set_page_config(
@@ -11,7 +14,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Custom CSS (matching Product Rank Dash styling) ───────────────────────────
+# ── Custom CSS (dark-first; follows Streamlit light/dark via --st-* fallbacks) ─
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&display=swap');
@@ -39,14 +42,15 @@ st.markdown("""
 
 html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {
     font-family: 'DM Sans', sans-serif !important;
-    color: var(--text-primary);
+    color: var(--st-text-color, var(--text-primary)) !important;
 }
 
 .stApp {
-    background-color: var(--bg-base) !important;
+    background-color: var(--st-background-color, var(--bg-base)) !important;
+    color: var(--st-text-color, var(--text-primary)) !important;
     background-image:
-        radial-gradient(ellipse 80% 40% at 50% -10%, rgba(61,142,248,0.08) 0%, transparent 60%),
-        radial-gradient(ellipse 40% 30% at 90% 80%, rgba(34,211,200,0.04) 0%, transparent 50%);
+        radial-gradient(ellipse 80% 40% at 50% -10%, rgba(61,142,248,0.06) 0%, transparent 58%),
+        radial-gradient(ellipse 40% 30% at 90% 80%, rgba(34,211,200,0.03) 0%, transparent 50%);
 }
 
 .main .block-container {
@@ -55,8 +59,8 @@ html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {
 }
 
 [data-testid="stSidebar"] {
-    background-color: var(--bg-card) !important;
-    border-right: 1px solid var(--border) !important;
+    background-color: var(--st-secondary-background-color, var(--bg-card)) !important;
+    border-right: 1px solid var(--st-border-color, var(--border)) !important;
 }
 [data-testid="stSidebar"] .stTitle > * {
     font-family: 'Syne', sans-serif !important;
@@ -80,17 +84,14 @@ html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {
 
 h1, h2, h3, h4 {
     font-family: 'Syne', sans-serif !important;
-    color: var(--text-primary) !important;
+    color: var(--st-text-color, var(--text-primary)) !important;
 }
 h1 { font-size: 1.8rem !important; font-weight: 800 !important; letter-spacing: -0.01em !important; }
 h2 { font-size: 1.25rem !important; font-weight: 700 !important; letter-spacing: 0.01em !important; }
 h3 { font-size: 1rem !important; font-weight: 600 !important; }
 
 [data-testid="stHeading"] h1 {
-    background: linear-gradient(135deg, var(--text-primary) 0%, var(--accent) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    color: var(--st-text-color, var(--text-primary)) !important;
     font-size: 2rem !important;
     font-weight: 800 !important;
     letter-spacing: -0.02em !important;
@@ -98,14 +99,14 @@ h3 { font-size: 1rem !important; font-weight: 600 !important; }
 }
 
 .stCaptionContainer, [data-testid="stCaptionContainer"], small, caption {
-    color: var(--text-secondary) !important;
+    color: var(--st-text-color-secondary, var(--text-secondary)) !important;
     font-size: 0.78rem !important;
     line-height: 1.5 !important;
 }
 
 [data-testid="stMetric"] {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
+    background: var(--st-secondary-background-color, var(--bg-card)) !important;
+    border: 1px solid var(--st-border-color, var(--border)) !important;
     border-radius: var(--radius-lg) !important;
     padding: 1rem 1.25rem !important;
     transition: border-color 0.2s, box-shadow 0.2s !important;
@@ -123,26 +124,26 @@ h3 { font-size: 1rem !important; font-weight: 600 !important; }
 }
 [data-testid="stMetric"]:hover { border-color: var(--border-bright) !important; box-shadow: 0 0 0 1px var(--border-bright), 0 4px 20px rgba(0,0,0,0.4) !important; }
 [data-testid="stMetric"]:hover::before { opacity: 1; }
-[data-testid="stMetricLabel"] { font-size: 0.68rem !important; font-weight: 500 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--text-secondary) !important; font-family: 'DM Sans', sans-serif !important; }
-[data-testid="stMetricValue"] { font-family: 'DM Mono', monospace !important; font-size: 1.5rem !important; font-weight: 500 !important; color: var(--text-primary) !important; line-height: 1.2 !important; }
+[data-testid="stMetricLabel"] { font-size: 0.68rem !important; font-weight: 500 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; font-family: 'DM Sans', sans-serif !important; }
+[data-testid="stMetricValue"] { font-family: 'DM Mono', monospace !important; font-size: 1.5rem !important; font-weight: 500 !important; color: var(--st-text-color, var(--text-primary)) !important; line-height: 1.2 !important; }
 [data-testid="stMetricDelta"] { font-family: 'DM Mono', monospace !important; font-size: 0.75rem !important; }
 [data-testid="stMetricDelta"] svg { display: none !important; }
 
-[data-testid="stTabs"] [role="tablist"] { border-bottom: 1px solid var(--border) !important; gap: 0 !important; background: transparent !important; }
-[data-testid="stTabs"] [role="tab"] { font-family: 'Syne', sans-serif !important; font-size: 0.78rem !important; font-weight: 600 !important; letter-spacing: 0.07em !important; text-transform: uppercase !important; color: var(--text-muted) !important; padding: 0.6rem 1.25rem !important; border: none !important; border-bottom: 2px solid transparent !important; background: transparent !important; transition: color 0.15s, border-color 0.15s !important; }
-[data-testid="stTabs"] [role="tab"]:hover { color: var(--text-secondary) !important; border-bottom-color: var(--border-bright) !important; }
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: var(--accent) !important; border-bottom-color: var(--accent) !important; background: transparent !important; }
+[data-testid="stTabs"] [role="tablist"] { border-bottom: 1px solid var(--st-border-color, var(--border)) !important; gap: 0 !important; background: transparent !important; }
+[data-testid="stTabs"] [role="tab"] { font-family: 'Syne', sans-serif !important; font-size: 0.78rem !important; font-weight: 600 !important; letter-spacing: 0.07em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-muted)) !important; padding: 0.6rem 1.25rem !important; border: none !important; border-bottom: 2px solid transparent !important; background: transparent !important; transition: color 0.15s, border-color 0.15s !important; }
+[data-testid="stTabs"] [role="tab"]:hover { color: var(--st-text-color, var(--text-secondary)) !important; border-bottom-color: var(--st-border-color, var(--border-bright)) !important; }
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: var(--st-primary-color, var(--accent)) !important; border-bottom-color: var(--st-primary-color, var(--accent)) !important; background: transparent !important; }
 
-hr { border: none !important; border-top: 1px solid var(--border) !important; margin: 2rem 0 !important; }
+hr { border: none !important; border-top: 1px solid var(--st-border-color, var(--border)) !important; margin: 2rem 0 !important; }
 
 .stSelectbox > div > div,
 .stMultiSelect > div > div,
 .stTextInput > div > div > input,
 .stDateInput > div > div > input {
-    background-color: var(--bg-card-alt) !important;
-    border: 1px solid var(--border-bright) !important;
+    background-color: var(--st-secondary-background-color, var(--bg-card-alt)) !important;
+    border: 1px solid var(--st-border-color, var(--border-bright)) !important;
     border-radius: var(--radius) !important;
-    color: var(--text-primary) !important;
+    color: var(--st-text-color, var(--text-primary)) !important;
     font-family: 'DM Sans', sans-serif !important;
     font-size: 0.85rem !important;
     transition: border-color 0.15s !important;
@@ -150,51 +151,166 @@ hr { border: none !important; border-top: 1px solid var(--border) !important; ma
 .stSelectbox > div > div:focus-within,
 .stMultiSelect > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent-glow) !important; outline: none !important; }
 
-[data-baseweb="menu"] { background-color: var(--bg-card-alt) !important; border: 1px solid var(--border-bright) !important; border-radius: var(--radius) !important; }
-[data-baseweb="menu"] li { font-family: 'DM Sans', sans-serif !important; font-size: 0.85rem !important; color: var(--text-primary) !important; }
-[data-baseweb="menu"] li:hover { background-color: var(--bg-hover) !important; }
+[data-baseweb="menu"] { background-color: var(--st-secondary-background-color, var(--bg-card-alt)) !important; border: 1px solid var(--st-border-color, var(--border-bright)) !important; border-radius: var(--radius) !important; }
+[data-baseweb="menu"] li { font-family: 'DM Sans', sans-serif !important; font-size: 0.85rem !important; color: var(--st-text-color, var(--text-primary)) !important; }
+[data-baseweb="menu"] li:hover { background-color: var(--st-secondary-background-color, var(--bg-hover)) !important; }
 [data-baseweb="tag"] { background-color: var(--accent-dim) !important; border: none !important; border-radius: 4px !important; font-size: 0.75rem !important; }
 
 .stRadio > div { gap: 0.5rem !important; background: transparent !important; border: none !important; padding: 0 !important; display: inline-flex !important; }
-.stRadio label { font-size: 0.75rem !important; font-weight: 500 !important; letter-spacing: 0.05em !important; text-transform: uppercase !important; padding: 0.3rem 0.85rem !important; border-radius: 6px !important; cursor: pointer !important; color: var(--text-secondary) !important; background: transparent !important; transition: color 0.15s !important; }
+.stRadio label { font-size: 0.75rem !important; font-weight: 500 !important; letter-spacing: 0.05em !important; text-transform: uppercase !important; padding: 0.3rem 0.85rem !important; border-radius: 6px !important; cursor: pointer !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; background: transparent !important; transition: color 0.15s !important; }
 
-[data-testid="stDataFrame"], .stDataFrame { border: 1px solid var(--border) !important; border-radius: var(--radius-lg) !important; overflow: hidden !important; }
-[data-testid="stDataFrame"] thead th { background: var(--bg-card-alt) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.68rem !important; font-weight: 600 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--text-secondary) !important; border-bottom: 1px solid var(--border-bright) !important; padding: 0.6rem 0.8rem !important; }
-[data-testid="stDataFrame"] tbody td { font-family: 'DM Mono', monospace !important; font-size: 0.82rem !important; color: var(--text-primary) !important; border-bottom: 1px solid var(--border) !important; padding: 0.5rem 0.8rem !important; background: var(--bg-card) !important; }
-[data-testid="stDataFrame"] tbody tr:hover td { background: var(--bg-hover) !important; }
+[data-testid="stDataFrame"], .stDataFrame { border: 1px solid var(--st-border-color, var(--border)) !important; border-radius: var(--radius-lg) !important; overflow: hidden !important; }
+[data-testid="stDataFrame"] thead th { background: var(--st-secondary-background-color, var(--bg-card-alt)) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.68rem !important; font-weight: 600 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; border-bottom: 1px solid var(--st-border-color, var(--border-bright)) !important; padding: 0.6rem 0.8rem !important; }
+[data-testid="stDataFrame"] thead th:not(:first-child),
+[data-testid="stDataFrame"] tbody td:not(:first-child) { text-align: right !important; }
+[data-testid="stDataFrame"] thead th:first-child,
+[data-testid="stDataFrame"] tbody td:first-child { text-align: left !important; }
+[data-testid="stDataFrame"] tbody td { font-family: 'DM Mono', monospace !important; font-size: 0.82rem !important; color: var(--st-text-color, var(--text-primary)) !important; border-bottom: 1px solid var(--st-border-color, var(--border)) !important; padding: 0.5rem 0.8rem !important; background: var(--st-secondary-background-color, var(--bg-card)) !important; }
+[data-testid="stDataFrame"] tbody tr:hover td { background: var(--st-secondary-background-color, var(--bg-hover)) !important; }
 
-.stButton > button { background: var(--accent) !important; color: white !important; border: none !important; border-radius: var(--radius) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.8rem !important; font-weight: 600 !important; letter-spacing: 0.05em !important; padding: 0.5rem 1.25rem !important; transition: all 0.15s !important; }
+.stButton > button { background: var(--st-primary-color, var(--accent)) !important; color: white !important; border: none !important; border-radius: var(--radius) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.8rem !important; font-weight: 600 !important; letter-spacing: 0.05em !important; padding: 0.5rem 1.25rem !important; transition: all 0.15s !important; }
 .stButton > button:hover { background: var(--accent-dim) !important; box-shadow: 0 4px 12px rgba(61,142,248,0.3) !important; transform: translateY(-1px) !important; }
 
-[data-testid="stHeading"] h2, .stMarkdown h2 { color: var(--text-primary) !important; font-size: 1.1rem !important; font-weight: 700 !important; letter-spacing: 0.02em !important; padding-top: 0.25rem !important; padding-bottom: 0.5rem !important; border-bottom: 1px solid var(--border) !important; margin-bottom: 1rem !important; }
+[data-testid="stHeading"] h2, .stMarkdown h2 { color: var(--st-text-color, var(--text-primary)) !important; font-size: 1.1rem !important; font-weight: 700 !important; letter-spacing: 0.02em !important; padding-top: 0.25rem !important; padding-bottom: 0.5rem !important; border-bottom: 1px solid var(--st-border-color, var(--border)) !important; margin-bottom: 1rem !important; }
 
 [data-testid="stInfo"] { background: rgba(61,142,248,0.08) !important; border: 1px solid rgba(61,142,248,0.25) !important; border-radius: var(--radius) !important; color: var(--accent) !important; font-size: 0.85rem !important; }
 [data-testid="stWarning"] { background: rgba(245,166,35,0.08) !important; border: 1px solid rgba(245,166,35,0.25) !important; border-radius: var(--radius) !important; color: var(--amber) !important; }
 
-[data-testid="stCaptionContainer"] p { color: var(--text-muted) !important; font-size: 0.78rem !important; font-family: 'DM Mono', monospace !important; letter-spacing: 0.05em !important; }
-.stMarkdown strong { color: var(--text-primary) !important; font-weight: 600 !important; }
+[data-testid="stCaptionContainer"] p { color: var(--st-text-color-secondary, var(--text-muted)) !important; font-size: 0.78rem !important; font-family: 'DM Mono', monospace !important; letter-spacing: 0.05em !important; }
+.stMarkdown strong { color: var(--st-text-color, var(--text-primary)) !important; font-weight: 600 !important; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--bg-base); }
-::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+::-webkit-scrollbar-track { background: var(--st-background-color, var(--bg-base)); }
+::-webkit-scrollbar-thumb { background: var(--st-border-color, var(--border-bright)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--st-text-color-secondary, var(--text-muted)); }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Plotly dark theme ──────────────────────────────────────────────────────────
-PLOT_LAYOUT = dict(
+# ── Plotly themes (match app dark / Streamlit light) ───────────────────────────
+PLOT_COLORWAY = ["#3d8ef8", "#22d3c8", "#f5a623", "#f43f5e", "#a78bfa", "#22c55e"]
+
+PLOT_LAYOUT_DARK = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="DM Sans, sans-serif", color="#8b95aa", size=12),
     xaxis=dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a"),
     yaxis=dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a"),
     legend=dict(bgcolor="rgba(19,22,29,0.8)", bordercolor="#252b3a", borderwidth=1, font=dict(size=11, color="#8b95aa")),
-    colorway=["#3d8ef8", "#22d3c8", "#f5a623", "#f43f5e", "#a78bfa", "#22c55e"],
+    colorway=PLOT_COLORWAY,
 )
 
-def apply_dark_theme(fig, **extra):
-    fig.update_layout(**{**PLOT_LAYOUT, **extra})
+PLOT_LAYOUT_LIGHT = dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(family="DM Sans, sans-serif", color="#64748b", size=12),
+    xaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1"),
+    yaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1"),
+    legend=dict(bgcolor="rgba(255,255,255,0.94)", bordercolor="#cbd5e1", borderwidth=1, font=dict(size=11, color="#64748b")),
+    colorway=PLOT_COLORWAY,
+)
+
+
+def chart_theme_is_light() -> bool:
+    try:
+        return str(st.context.theme.get("type", "") or "").lower() == "light"
+    except Exception:
+        return False
+
+
+def plotly_axis_lines():
+    if chart_theme_is_light():
+        return dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1")
+    return dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a")
+
+
+def apply_chart_theme(fig, **extra):
+    base = PLOT_LAYOUT_LIGHT if chart_theme_is_light() else PLOT_LAYOUT_DARK
+    fig.update_layout(**{**base, **extra})
     return fig
+
+
+def apply_dark_theme(fig, **extra):
+    return apply_chart_theme(fig, **extra)
+
+
+def dataframe_display_height(n_rows: int, min_rows: int = 4, row_px: int = 36, header_px: int = 52, cap: int = 2200) -> int:
+    try:
+        n = max(min_rows, int(n_rows))
+    except (TypeError, ValueError):
+        n = min_rows
+    return int(min(cap, header_px + row_px * n))
+
+
+def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_label: str = "Copy"):
+    """Renders download + copy actions (place below ``st.dataframe``). Copy button sized to match Streamlit download."""
+    tsv = display_df.to_csv(index=False, sep="\t")
+    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
+    uid = hashlib.md5(download_filename.encode(), usedforsecurity=False).hexdigest()[:12]
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name=download_filename,
+            mime="text/csv",
+            key=f"dl_{uid}",
+        )
+    with b2:
+        tsv_literal = json.dumps(tsv)
+        lbl_literal = json.dumps(copy_label)
+        st_components.html(
+            f"""<div style="font-family:DM Sans,sans-serif;padding:0;margin:0;">
+<button type="button" id="cpbtn_{uid}"
+  style="background:#3d8ef8;color:#fff;border:none;border-radius:0.5rem;box-sizing:border-box;
+  width:100%;min-height:2.625rem;height:2.625rem;padding:0 1.25rem;font-size:0.875rem;font-weight:600;
+  line-height:1.2;cursor:pointer;display:flex;align-items:center;justify-content:center;">{copy_label}</button>
+</div>
+<script>
+(function() {{
+  var text = {tsv_literal};
+  var orig = {lbl_literal};
+  var b = document.getElementById("cpbtn_{uid}");
+  if (!b) return;
+  b.addEventListener("click", function() {{
+    function fallbackCopy() {{
+      try {{
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, 999999);
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }} catch (e) {{}}
+    }}
+    if (navigator.clipboard && window.isSecureContext) {{
+      navigator.clipboard.writeText(text).catch(fallbackCopy);
+    }} else {{
+      fallbackCopy();
+    }}
+    b.textContent = "Copied";
+    setTimeout(function() {{ b.textContent = orig; }}, 1600);
+  }});
+}})();
+</script>""",
+            height=52,
+        )
+
+
+def overview_chart_title(metric: str, group_choice: str) -> str:
+    if group_choice == "None (Overall)":
+        return metric
+    return f"{metric} × {group_choice}"
+
+
+def lift_chart_title(metric: str, group_choice: str, view: str) -> str:
+    if group_choice == "None (Overall)":
+        return f"{metric} — {view}"
+    return f"{metric} × {group_choice} — {view}"
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl="24h")
@@ -247,12 +363,12 @@ with st.sidebar:
     sel_calltype = st.multiselect("Site/SERP",        options=calltype_opts, default=[], key="f_calltype")
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
-def apply_filters(base):
+def apply_filters(base, use_date_range=True):
     d = base.copy()
     # Always filter to Arcadia only outside of the Arcadia vs Atom tab
     if "membership" in d.columns:
         d = d[d["membership"] == "Arcadia"]
-    if len(date_range) == 2:
+    if use_date_range and len(date_range) == 2:
         d = d[(d["call_date_est"].dt.date >= date_range[0]) & (d["call_date_est"].dt.date <= date_range[1])]
     if sel_center   and "center_location"  in d.columns: d = d[d["center_location"].isin(sel_center)]
     if sel_mkt      and "marketing_bucket" in d.columns: d = d[d["marketing_bucket"].isin(sel_mkt)]
@@ -277,6 +393,36 @@ def period_display(label_series, period):
 
 def safe_rate(num, denom):
     return num / denom if denom > 0 else float("nan")
+
+
+# Funnel / overview metric names where a *decrease* (P2 vs P1, or vs prior week) is better
+FUNNEL_METRIC_LOWER_IS_BETTER = frozenset({"Talk Time", "Sold Talk Time", "Unsold Talk Time"})
+# Lift tab KPI keys (same semantics for Arcadia vs Atom deltas)
+LIFT_KPI_LOWER_IS_BETTER = frozenset({"tt"})
+
+
+def pct_change_cell_style(metric_id: str, pct_num: float, neutral_abs: float = 1.5) -> str:
+    """CSS for a numeric % change. metric_id = funnel 'Metric' name or lift KPI key (e.g. 'tt')."""
+    if pct_num is None or (isinstance(pct_num, float) and (pd.isna(pct_num) or np.isinf(pct_num))):
+        return ""
+    if abs(float(pct_num)) < neutral_abs:
+        return "background-color: #2a2a1a; color: #c8a000"
+    lower_better = metric_id in FUNNEL_METRIC_LOWER_IS_BETTER or metric_id in LIFT_KPI_LOWER_IS_BETTER
+    good = (float(pct_num) < 0) if lower_better else (float(pct_num) > 0)
+    if good:
+        return "background-color: #0f2a1a; color: #22c55e"
+    return "background-color: #2a1018; color: #f43f5e"
+
+
+def parse_display_pct(val):
+    """Parse '+12.3%' / '-4.0%' / '—' from styled tables into a float or None."""
+    if val is None or val == "—" or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().replace("%", "").replace("+", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 def delta_str_pct(cur, prev):
     if pd.isna(cur) or pd.isna(prev) or prev == 0:
@@ -352,7 +498,9 @@ st.caption(f"{date_str}  ·  {len(df):,} calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab_overview, tab_agent, tab_lift = st.tabs([
-    "Overview", "Agent Level","Arcadia vs Atom"
+    "Overview",
+    "Agent Level",
+    "Arcadia vs Atom",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -365,8 +513,8 @@ with tab_overview:
     st.caption("Automatically compares the two most recent ISO weeks · ignores date filter")
 
     def _wk_raw(fn):
-        """Uses df_raw with all non-date sidebar filters applied."""
-        return week_kpi(apply_filters(df_raw.copy()), fn)
+        """Uses df_raw with sidebar filters except date (week KPIs are always last 2 ISO weeks)."""
+        return week_kpi(apply_filters(df_raw.copy(), use_date_range=False), fn)
 
     def wk_pct_delta(cur, prev):
         if cur is None or prev is None or pd.isna(cur) or pd.isna(prev) or prev == 0:
@@ -395,7 +543,12 @@ with tab_overview:
     km2.metric("Net Conversion",     f"{lw_net_conv:.1%}"    if lw_net_conv  and not pd.isna(lw_net_conv)  else "—", delta=wk_pct_delta(cv2, pv2))
     km3.metric("Rev / Order",        f"${lw_rev_order:,.2f}" if lw_rev_order and not pd.isna(lw_rev_order) else "—", delta=wk_pct_delta(cv3, pv3))
     km4.metric("Calls Into Credit",  f"{lw_cic:.1%}"         if lw_cic       and not pd.isna(lw_cic)       else "—", delta=wk_pct_delta(cv4, pv4))
-    km5.metric("Talk Time",          f"{lw_tt:.1f} min"      if lw_tt        and not pd.isna(lw_tt)        else "—", delta=wk_pct_delta(cv5, pv5))
+    km5.metric(
+        "Talk Time",
+        f"{lw_tt:.1f} min" if lw_tt and not pd.isna(lw_tt) else "—",
+        delta=wk_pct_delta(cv5, pv5),
+        delta_color="inverse",
+    )
 
     st.divider()
 
@@ -481,9 +634,127 @@ with tab_overview:
             funnel_rows.append(row)
 
         funnel_table = pd.DataFrame(funnel_rows)
-        st.dataframe(funnel_table, use_container_width=True, hide_index=True)
+        st.dataframe(
+            funnel_table,
+            use_container_width=True,
+            hide_index=True,
+            height=dataframe_display_height(len(funnel_table)),
+        )
+        table_export_row(funnel_table, "funnel_over_time.csv")
     else:
         st.info("No data available.")
+
+    # ── Custom period comparison (ignores sidebar date filter) ─────────────────
+    st.subheader("Custom Period Comparison")
+    st.caption(
+        "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
+        "Each period is one aggregate over its date window (same metrics as the funnel table)."
+    )
+    df_cmp = apply_filters(df_raw.copy(), use_date_range=False)
+    if "call_date_est" in df_cmp.columns and len(df_cmp) > 0:
+        _cmp_min = df_cmp["call_date_est"].min().date()
+        _cmp_max = df_cmp["call_date_est"].max().date()
+        _w = timedelta(days=6)
+        _d2_end = _cmp_max
+        _d2_start = max(_cmp_min, _d2_end - _w)
+        _d1_end = _d2_start - timedelta(days=1)
+        _d1_start = max(_cmp_min, _d1_end - _w)
+        if _d1_start > _d1_end:
+            _d1_start = _cmp_min
+            _d1_end = min(_cmp_max, _d1_start + _w)
+
+        pc_a, pc_b = st.columns(2)
+        with pc_a:
+            cmp_range_1 = st.date_input(
+                "Period 1",
+                value=(_d1_start, _d1_end),
+                min_value=_cmp_min,
+                max_value=_cmp_max,
+                key="ov_cmp_period1",
+            )
+        with pc_b:
+            cmp_range_2 = st.date_input(
+                "Period 2",
+                value=(_d2_start, _d2_end),
+                min_value=_cmp_min,
+                max_value=_cmp_max,
+                key="ov_cmp_period2",
+            )
+
+        def _slice_period(d_all, dr):
+            if len(dr) != 2:
+                return d_all.iloc[0:0]
+            a, b = dr[0], dr[1]
+            if a > b:
+                a, b = b, a
+            m = (d_all["call_date_est"].dt.date >= a) & (d_all["call_date_est"].dt.date <= b)
+            return d_all.loc[m]
+
+        def _pct_change_numeric(v1, v2):
+            if v1 is None or v2 is None:
+                return float("nan")
+            if (isinstance(v1, float) and pd.isna(v1)) or (isinstance(v2, float) and pd.isna(v2)):
+                return float("nan")
+            try:
+                v1 = float(v1)
+                v2 = float(v2)
+            except (TypeError, ValueError):
+                return float("nan")
+            if v1 == 0:
+                return float("nan")
+            return (v2 / v1 - 1.0) * 100.0
+
+        def _fmt_pct_change(p):
+            if p is None or (isinstance(p, float) and pd.isna(p)):
+                return "—"
+            return f"{p:+.1f}%"
+
+        if len(cmp_range_1) == 2 and len(cmp_range_2) == 2:
+            g1 = _slice_period(df_cmp, cmp_range_1)
+            g2 = _slice_period(df_cmp, cmp_range_2)
+            c1a, c1b = sorted([cmp_range_1[0], cmp_range_1[1]])
+            c2a, c2b = sorted([cmp_range_2[0], cmp_range_2[1]])
+            col1 = f"P1 ({c1a.strftime('%b %d, %Y')} – {c1b.strftime('%b %d, %Y')})"
+            col2 = f"P2 ({c2a.strftime('%b %d, %Y')} – {c2b.strftime('%b %d, %Y')})"
+
+            cmp_rows = []
+            for metric, fmt in FUNNEL_METRICS:
+                raw1 = compute_funnel_row(g1, metric)
+                raw2 = compute_funnel_row(g2, metric)
+                disp1 = fmt_funnel(raw1, fmt)
+                disp2 = fmt_funnel(raw2, fmt)
+                pch = _pct_change_numeric(raw1, raw2)
+                cmp_rows.append(
+                    {
+                        "Metric": metric,
+                        col1: disp1,
+                        col2: disp2,
+                        "% Change (P2 vs P1)": _fmt_pct_change(pch),
+                    }
+                )
+            cmp_table = pd.DataFrame(cmp_rows)
+            _pch_col = "% Change (P2 vs P1)"
+
+            def _style_cmp_row(row):
+                m = row["Metric"]
+                p = parse_display_pct(row[_pch_col])
+                out = pd.Series("", index=row.index)
+                if p is not None:
+                    out[_pch_col] = pct_change_cell_style(m, p)
+                return out
+
+            cmp_styler = cmp_table.style.apply(_style_cmp_row, axis=1)
+            st.dataframe(
+                cmp_styler,
+                use_container_width=True,
+                hide_index=True,
+                height=dataframe_display_height(len(cmp_table)),
+            )
+            table_export_row(cmp_table, "period_comparison.csv")
+        else:
+            st.info("Select a full start and end date for each period.")
+    else:
+        st.info("No data available for period comparison with current filters.")
 
     st.divider()
 
@@ -573,6 +844,8 @@ with tab_overview:
         ov_ts_overall["period_display"] = ov_ts_overall["period"].dt.strftime(PERIOD_FMT[ov_gran])
 
         fig_ov_trend = go.Figure()
+        _ax_ov = plotly_axis_lines()
+        _muted = "#64748b" if chart_theme_is_light() else "#8b95aa"
 
         if ov_group_col and ov_group_col in ov_ts_df.columns:
             for group_val, grp_c in ov_ts_df.groupby(ov_group_col):
@@ -590,33 +863,95 @@ with tab_overview:
                     line=dict(width=2), marker=dict(size=5),
                 ))
 
-        # Always show overall as dotted line
         fig_ov_trend.add_trace(go.Scatter(
             x=ov_ts_overall["period"], y=ov_ts_overall["value"],
             name="Overall", mode="lines+markers",
-            line=dict(width=2, dash="dot", color="#8b95aa"),
-            marker=dict(size=5, color="#8b95aa"),
+            line=dict(width=2, dash="dot", color=_muted),
+            marker=dict(size=5, color=_muted),
         ))
 
-        # Use datetime x-axis with formatted tick labels — guarantees chronological order
         tick_vals = ov_ts_overall["period"].tolist()
         tick_text = ov_ts_overall["period"].dt.strftime(PERIOD_FMT[ov_gran]).tolist()
 
-        apply_dark_theme(fig_ov_trend,
-            yaxis_tickformat=".1%" if fmt_ov == "pct" else ("$,.0f" if fmt_ov == "dollar" else ".2f"),
-            yaxis_tickprefix="$" if fmt_ov == "dollar" else "",
-            xaxis=dict(
-                tickvals=tick_vals,
-                ticktext=tick_text,
-                gridcolor="#1e2330",
-                linecolor="#252b3a",
-                tickcolor="#252b3a",
-            ),
-            height=360,
-            margin=dict(l=50, r=20, t=10, b=40),
+        if fmt_ov == "pct":
+            y_fmt, y_prefix, y_suffix, y_title = ".1%", "", "", ov_metric_choice
+        elif fmt_ov == "dollar":
+            y_fmt, y_prefix, y_suffix, y_title = ",.0f", "$", "", ov_metric_choice
+        elif ov_metric_choice == "Talk Time":
+            y_fmt, y_prefix, y_suffix, y_title = ".2f", "", "", "Talk Time (Minutes)"
+        else:
+            y_fmt, y_prefix, y_suffix, y_title = ",.0f", "", "", ov_metric_choice
+
+        _tcol = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
+        _trend_title = overview_chart_title(ov_metric_choice, ov_group_choice)
+        apply_chart_theme(
+            fig_ov_trend,
+            title=dict(text=_trend_title, x=0.02, xanchor="left", font=dict(size=16, color=_tcol)),
+            yaxis_tickformat=y_fmt,
+            yaxis_tickprefix=y_prefix,
+            yaxis_ticksuffix=y_suffix,
+            yaxis_title=y_title,
+            xaxis=dict(tickvals=tick_vals, ticktext=tick_text, **_ax_ov),
+            height=400,
+            margin=dict(l=50, r=20, t=48, b=40),
             legend=dict(orientation="h", y=-0.2),
         )
         st.plotly_chart(fig_ov_trend, use_container_width=True)
+
+        # ── Performance snapshot (bar) — same metric / group as trend ───────────
+        st.divider()
+        st.subheader("Performance Snapshot")
+        st.caption(
+            "Same metric and group by as above · one value per category for the full filtered date range."
+        )
+        _snap_title = overview_chart_title(ov_metric_choice, ov_group_choice)
+
+        def _fmt_bar_val(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return "—"
+            if fmt_ov == "pct":
+                return f"{v:.1%}"
+            if fmt_ov == "dollar":
+                return f"${v:,.0f}"
+            if ov_metric_choice == "Talk Time":
+                return f"{v:.1f}"
+            return f"{v:,.0f}"
+
+        if ov_group_col and ov_group_col in ov_ts_df.columns:
+            bar_parts = [{"Category": str(gv), "Value": agg_metric_ov(gx)} for gv, gx in ov_ts_df.groupby(ov_group_col)]
+            bar_df = pd.DataFrame(bar_parts).sort_values("Value", ascending=False, na_position="last")
+        else:
+            bar_df = pd.DataFrame([{"Category": "Overall", "Value": agg_metric_ov(ov_ts_df)}])
+
+        _bar_colors = (PLOT_COLORWAY * (1 + len(bar_df) // max(len(PLOT_COLORWAY), 1)))[: max(len(bar_df), 1)]
+        _tcol2 = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
+        _mline = "#cbd5e1" if chart_theme_is_light() else "#252b3a"
+        fig_ov_bar = go.Figure(
+            go.Bar(
+                x=bar_df["Category"],
+                y=bar_df["Value"],
+                marker_color=_bar_colors,
+                opacity=0.92,
+                marker_line_color=_mline,
+                marker_line_width=1,
+                text=[_fmt_bar_val(v) for v in bar_df["Value"]],
+                textposition="outside",
+                textfont=dict(size=11, color=_tcol2),
+            )
+        )
+        apply_chart_theme(
+            fig_ov_bar,
+            title=dict(text=_snap_title, x=0.02, xanchor="left", font=dict(size=16, color=_tcol2)),
+            yaxis_tickformat=y_fmt,
+            yaxis_tickprefix=y_prefix,
+            yaxis_ticksuffix=y_suffix,
+            yaxis_title=y_title,
+            xaxis=dict(title="", tickangle=-22, automargin=True, **_ax_ov),
+            height=min(920, 320 + 48 * max(len(bar_df), 1)),
+            margin=dict(l=50, r=28, t=56, b=120),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_ov_bar, use_container_width=True)
     else:
         st.info("No data available for trend chart.")
 
@@ -642,7 +977,7 @@ with tab_agent:
             agent_search = st.text_input("Search Agent", key="agent_search", placeholder="Type to filter…")
         with al_c2:
             sort_col = st.selectbox(
-                "Sort by",
+                "Sort By",
                 ["Calls", "Net Conv.", "Rev / Call", "Rev / Order", "Top Product Mix",
                  "Total Revenue", "Talk Time", "Sold Talk Time"],
                 key="agent_sort",
@@ -697,31 +1032,44 @@ with tab_agent:
         # Distribution charts
         dc1, dc2 = st.columns(2)
 
+        _hist_line = "#cbd5e1" if chart_theme_is_light() else "#252b3a"
+        _ht = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
         with dc1:
-            st.markdown("**Net Conversion Distribution**")
+            st.markdown("**Net Conversion × Agents (Distribution)**")
             fig_nc = go.Figure(go.Histogram(
-                x=agent_df["Net Conv."].dropna() * 100, nbinsx=20,
+                x=agent_df["Net Conv."].dropna(),
+                nbinsx=20,
                 marker_color="#3d8ef8", opacity=0.8,
-                marker_line_color="#252b3a", marker_line_width=1,
+                marker_line_color=_hist_line,
+                marker_line_width=1,
             ))
-            apply_dark_theme(fig_nc,
-                xaxis_title="Net Conversion (%)",
+            apply_chart_theme(
+                fig_nc,
+                title=dict(text="Net conversion × agents", x=0.02, xanchor="left", font=dict(size=14, color=_ht)),
+                xaxis_tickformat=".1%",
+                xaxis_title="Net conversion",
                 yaxis_title="Agents",
-                height=240, margin=dict(l=40, r=20, t=10, b=40),
+                height=260,
+                margin=dict(l=44, r=20, t=40, b=44),
             )
             st.plotly_chart(fig_nc, use_container_width=True)
 
         with dc2:
-            st.markdown("**Rev / Call Distribution**")
+            st.markdown("**Revenue Per Call × Agents (Distribution)**")
             fig_rc = go.Figure(go.Histogram(
                 x=agent_df["Rev / Call"].dropna(), nbinsx=20,
                 marker_color="#22d3c8", opacity=0.8,
-                marker_line_color="#252b3a", marker_line_width=1,
+                marker_line_color=_hist_line,
+                marker_line_width=1,
             ))
-            apply_dark_theme(fig_rc,
-                xaxis_title="Revenue per Call ($)",
+            apply_chart_theme(
+                fig_rc,
+                title=dict(text="Revenue per call × agents", x=0.02, xanchor="left", font=dict(size=14, color=_ht)),
+                xaxis_tickformat="$,.0f",
+                xaxis_title="Revenue per call",
                 yaxis_title="Agents",
-                height=240, margin=dict(l=40, r=20, t=10, b=40),
+                height=260,
+                margin=dict(l=44, r=20, t=40, b=44),
             )
             st.plotly_chart(fig_rc, use_container_width=True)
 
@@ -735,7 +1083,13 @@ with tab_agent:
             fmt_df[col] = fmt_df[col].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "—")
         fmt_df["Calls"] = fmt_df["Calls"].apply(lambda x: f"{x:,}")
 
-        st.dataframe(fmt_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            fmt_df,
+            use_container_width=True,
+            hide_index=True,
+            height=dataframe_display_height(len(fmt_df)),
+        )
+        table_export_row(fmt_df, "agent_level.csv")
 
 with tab_lift:
 
@@ -780,7 +1134,7 @@ with tab_lift:
     cfg = CENTER_CONFIG[lift_center]
 
     # ── Load CSV ───────────────────────────────────────────────────────────────
-    @st.cache_data(ttl="24h")
+    @st.cache_data(ttl=None)
     def load_lift_data(file_base):
         import glob
         chunks = []
@@ -848,7 +1202,7 @@ with tab_lift:
     lift_date_col1, lift_date_col2 = st.columns(2)
     with lift_date_col1:
         lift_start_date = st.date_input(
-            "Post period from",
+            "Post Period From",
             value=min_post_date,
             min_value=min_post_date,
             max_value=max_post_date,
@@ -856,7 +1210,7 @@ with tab_lift:
         )
     with lift_date_col2:
         lift_end_date = st.date_input(
-            "Post period to",
+            "Post Period To",
             value=max_post_date,
             min_value=min_post_date,
             max_value=max_post_date,
@@ -1103,7 +1457,12 @@ with tab_lift:
     kc = st.columns(5)
     for i, (k, lbl) in enumerate(top_kpis):
         val, delta = fmt_swing_metric(k)
-        kc[i].metric(lbl, val, delta=delta)
+        kc[i].metric(
+            lbl,
+            val,
+            delta=delta,
+            delta_color="inverse" if k in LIFT_KPI_LOWER_IS_BETTER else "normal",
+        )
 
     st.divider()
 
@@ -1142,20 +1501,31 @@ with tab_lift:
             "Swing":          fmt_delta_cell(weighted_avg(f"swing_{k}")),
         })
 
-    def color_swing(val):
-        if val == "—":
-            return ""
-        try:
-            num = float(val.replace("%", "").replace("+", ""))
-        except Exception:
-            return ""
-        if abs(num) < 1: return "background-color: #2a2a1a; color: #c8a000"
-        if num > 0:      return "background-color: #0f2a1a; color: #22c55e"
-        return "background-color: #2a1018; color: #f43f5e"
+    _lift_lbl_to_key = {lbl: k for k, lbl, _ in LIFT_KPI_SPECS}
+
+    def _style_lift_summary_row(row):
+        k = _lift_lbl_to_key.get(row["KPI"])
+        out = pd.Series("", index=row.index)
+        if k is None:
+            return out
+        for col in ("Pre Δ", "Post Δ", "Swing"):
+            if col not in out.index:
+                continue
+            p = parse_display_pct(row[col])
+            if p is None:
+                continue
+            out[col] = pct_change_cell_style(k, p)
+        return out
 
     summary_tbl = pd.DataFrame(table_rows)
-    styler = summary_tbl.style.map(color_swing, subset=["Post Δ", "Swing"])
-    st.dataframe(styler, use_container_width=True, hide_index=True)
+    styler = summary_tbl.style.apply(_style_lift_summary_row, axis=1)
+    st.dataframe(
+        styler,
+        use_container_width=True,
+        hide_index=True,
+        height=dataframe_display_height(len(summary_tbl)),
+    )
+    table_export_row(summary_tbl, "arcadia_vs_atom_summary.csv")
 
     st.divider()
 
@@ -1349,19 +1719,21 @@ with tab_lift:
         is_dollar = lift_metric_fmt == "dollar" and lift_view == "Raw KPI Value"
         all_x     = sorted(set(x for _, xs, _, _ in traces for x in xs))
 
-        apply_dark_theme(
+        _lift_ax = plotly_axis_lines()
+        _lift_title = lift_chart_title(lift_metric, lift_group_choice, lift_view)
+        _lift_tcol = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
+        apply_chart_theme(
             fig_lift,
+            title=dict(text=_lift_title, x=0.02, xanchor="left", font=dict(size=16, color=_lift_tcol)),
             yaxis_tickformat=".1%" if is_pct else ("$,.1f" if is_dollar else ".2f"),
             yaxis_tickprefix="$" if is_dollar else "",
             xaxis=dict(
                 tickvals=all_x,
                 ticktext=[x.strftime("%b %d") for x in all_x],
-                gridcolor="#1e2330",
-                linecolor="#252b3a",
-                tickcolor="#252b3a",
+                **_lift_ax,
             ),
-            height=400,
-            margin=dict(l=50, r=20, t=10, b=40),
+            height=420,
+            margin=dict(l=50, r=20, t=48, b=40),
             legend=dict(orientation="h", y=-0.25),
         )
 

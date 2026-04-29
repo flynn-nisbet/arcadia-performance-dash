@@ -1,2 +1,5 @@
 pandas
+numpy
+plotly
+streamlit>=1.33.0
 databricks-connect==16.1.7
