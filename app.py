@@ -237,32 +237,28 @@ with st.sidebar:
 
     center_opts   = sorted(df_raw["center_location"].dropna().unique().tolist()) if "center_location" in df_raw.columns else []
     mkt_opts      = sorted(df_raw["marketing_bucket"].dropna().unique().tolist()) if "marketing_bucket" in df_raw.columns else []
-    serp_opts     = sorted(df_raw["site_serp"].dropna().unique().tolist()) if "site_serp" in df_raw.columns else []
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
     tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
     calltype_opts = sorted(df_raw["call_type"].dropna().unique().tolist()) if "call_type" in df_raw.columns else []
-    cohort_opts   = sorted(df_raw["membership"].dropna().unique().tolist()) if "membership" in df_raw.columns else []
-
     sel_center   = st.multiselect("Center",           options=center_opts,   default=[], key="f_center")
     sel_mkt      = st.multiselect("Marketing Bucket", options=mkt_opts,      default=[], key="f_mkt")
-    sel_serp     = st.multiselect("Site / SERP",      options=serp_opts,     default=[], key="f_serp")
     sel_mov      = st.multiselect("Mover / Switcher", options=mov_opts,      default=[], key="f_mov")
     sel_tenure   = st.multiselect("Tenure Bucket",    options=tenure_opts,   default=[], key="f_tenure")
-    sel_calltype = st.multiselect("Call Type",        options=calltype_opts, default=[], key="f_calltype")
-    sel_cohort   = st.multiselect("Membership",       options=cohort_opts,   default=[], key="f_cohort")
+    sel_calltype = st.multiselect("Site/SERP",        options=calltype_opts, default=[], key="f_calltype")
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base):
     d = base.copy()
+    # Always filter to Arcadia only outside of the Arcadia vs Atom tab
+    if "membership" in d.columns:
+        d = d[d["membership"] == "Arcadia"]
     if len(date_range) == 2:
         d = d[(d["call_date_est"].dt.date >= date_range[0]) & (d["call_date_est"].dt.date <= date_range[1])]
     if sel_center   and "center_location"  in d.columns: d = d[d["center_location"].isin(sel_center)]
     if sel_mkt      and "marketing_bucket" in d.columns: d = d[d["marketing_bucket"].isin(sel_mkt)]
-    if sel_serp     and "site_serp"        in d.columns: d = d[d["site_serp"].isin(sel_serp)]
     if sel_mov      and "moverSwitcher"    in d.columns: d = d[d["moverSwitcher"].isin(sel_mov)]
     if sel_tenure   and "tenure_bucket"    in d.columns: d = d[d["tenure_bucket"].isin(sel_tenure)]
     if sel_calltype and "call_type"        in d.columns: d = d[d["call_type"].isin(sel_calltype)]
-    if sel_cohort   and "membership"       in d.columns: d = d[d["membership"].isin(sel_cohort)]
     return d
 
 df = apply_filters(df_raw)
@@ -355,476 +351,277 @@ st.title("⚡ Arcadia Performance Dash")
 st.caption(f"{date_str}  ·  {len(df):,} calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_overview, tab_trends, tab_cohort, tab_agent = st.tabs([
-    "Overview", "Trends Over Time", "Arcadia vs Atom", "Agent Level"
+tab_overview, tab_agent, tab_lift = st.tabs([
+    "Overview", "Agent Level","Arcadia vs Atom"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW
+# TAB — OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_overview:
 
-    kpis = compute_kpis(df)
+    # ── Top KPI row — always last week vs prior week, ignores date filter ──────
+    st.subheader("Last Week vs Prior Week")
+    st.caption("Automatically compares the two most recent ISO weeks · ignores date filter")
 
-    # ── Week-over-week KPI metrics ─────────────────────────────────────────────
-    st.subheader("Key Metrics")
-    st.caption("Current filtered period · delta vs prior ISO week (ignores date filter for comparison)")
+    def _wk_raw(fn):
+        """Uses df_raw with all non-date sidebar filters applied."""
+        return week_kpi(apply_filters(df_raw.copy()), fn)
 
-    def _wk(fn): return week_kpi(apply_filters(df_raw.copy()), fn)
+    def wk_pct_delta(cur, prev):
+        if cur is None or prev is None or pd.isna(cur) or pd.isna(prev) or prev == 0:
+            return None
+        return f"{(cur / prev - 1) * 100:+.1f}% vs prior wk"
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    # Compute last-week values for display (not filtered by date)
+    def last_week_val(fn):
+        this_v, _ = _wk_raw(fn)
+        return this_v
 
-    cv, pv = _wk(lambda d: len(d))
-    m1.metric("Calls", f"{kpis['n_calls']:,}", delta=f"{cv - pv:+,} vs prior wk" if cv and pv else None)
+    lw_rev_call  = last_week_val(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, len(d)))
+    lw_net_conv  = last_week_val(lambda d: safe_rate(d["orders"].sum() if "orders" in d.columns else 0, len(d)))
+    lw_rev_order = last_week_val(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, d["orders"].sum() if "orders" in d.columns else 0))
+    lw_cic       = last_week_val(lambda d: safe_rate(d["credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, len(d)))
+    lw_tt        = last_week_val(lambda d: d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
-    cv, pv = _wk(lambda d: safe_rate(d["orders"].sum(), len(d)) if "orders" in d.columns else float("nan"))
-    m2.metric("Net Conversion", f"{kpis['net_conversion']:.1%}", delta=delta_str_pct(cv, pv))
+    cv1, pv1 = _wk_raw(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, len(d)))
+    cv2, pv2 = _wk_raw(lambda d: safe_rate(d["orders"].sum() if "orders" in d.columns else 0, len(d)))
+    cv3, pv3 = _wk_raw(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, d["orders"].sum() if "orders" in d.columns else 0))
+    cv4, pv4 = _wk_raw(lambda d: safe_rate(d["credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, len(d)))
+    cv5, pv5 = _wk_raw(lambda d: d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
-    cv, pv = _wk(lambda d: d["total_revenue"].sum() if "total_revenue" in d.columns else d["gcv_fo"].sum() if "gcv_fo" in d.columns else 0)
-    m3.metric("Total Revenue", f"${kpis['total_revenue']:,.0f}", delta=delta_str_dollar(cv, pv))
-
-    cv, pv = _wk(lambda d: safe_rate((d["total_revenue"].sum() if "total_revenue" in d.columns else 0), len(d)))
-    m4.metric("Rev / Call", f"${kpis['rev_per_call']:,.2f}", delta=delta_str_dollar(cv, pv))
-
-    cv, pv = _wk(lambda d: safe_rate(d["tpsales_flag"].sum() if "tpsales_flag" in d.columns else 0, d["orders"].sum() if "orders" in d.columns else 0))
-    m5.metric("Top Product Mix", f"{kpis['top_product_mix']:.1%}", delta=delta_str_pct(cv, pv))
-
-    cv, pv = _wk(lambda d: d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
-    m6.metric("Avg Talk Time", f"{kpis['talk_time']:.1f} min", delta=f"{cv - pv:+.2f} min vs prior wk" if cv and pv else None)
-
-    st.divider()
-
-    # ── Credit funnel ──────────────────────────────────────────────────────────
-    st.subheader("Credit Funnel")
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Contact Rate",          f"{kpis['contact_rate']:.1%}")
-    c2.metric("Credit Rate",           f"{kpis['credit_rate']:.1%}")
-    c3.metric("Passed Credit Rate",    f"{kpis['pass_credit_rate']:.1%}")
-    c4.metric("Failed Credit Rate",    f"{kpis['fail_credit_rate']:.1%}")
-    c5.metric("Passed Credit Conv.",   f"{kpis['pass_credit_conv']:.1%}")
-    c6.metric("Failed Credit Conv.",   f"{kpis['fail_credit_conv']:.1%}")
+    km1, km2, km3, km4, km5 = st.columns(5)
+    km1.metric("Rev / Call",         f"${lw_rev_call:,.2f}"  if lw_rev_call  and not pd.isna(lw_rev_call)  else "—", delta=wk_pct_delta(cv1, pv1))
+    km2.metric("Net Conversion",     f"{lw_net_conv:.1%}"    if lw_net_conv  and not pd.isna(lw_net_conv)  else "—", delta=wk_pct_delta(cv2, pv2))
+    km3.metric("Rev / Order",        f"${lw_rev_order:,.2f}" if lw_rev_order and not pd.isna(lw_rev_order) else "—", delta=wk_pct_delta(cv3, pv3))
+    km4.metric("Calls Into Credit",  f"{lw_cic:.1%}"         if lw_cic       and not pd.isna(lw_cic)       else "—", delta=wk_pct_delta(cv4, pv4))
+    km5.metric("Talk Time",          f"{lw_tt:.1f} min"      if lw_tt        and not pd.isna(lw_tt)        else "—", delta=wk_pct_delta(cv5, pv5))
 
     st.divider()
 
-    # ── KPI summary table ──────────────────────────────────────────────────────
-    st.subheader("Summary by Center")
+    # ── Funnel table ───────────────────────────────────────────────────────────
+    st.subheader("Funnel Over Time")
 
-    if "center_location" in df.columns:
-        rows = []
-        for center, grp in df.groupby("center_location"):
-            k = compute_kpis(grp)
-            rows.append({
-                "Center":             center,
-                "Calls":              f"{k['n_calls']:,}",
-                "Net Conv.":          f"{k['net_conversion']:.1%}",
-                "Top Product Mix":    f"{k['top_product_mix']:.1%}",
-                "Total Revenue":      f"${k['total_revenue']:,.0f}",
-                "Rev / Call":         f"${k['rev_per_call']:,.2f}",
-                "Rev / Order":        f"${k['rev_per_order']:,.2f}",
-                "Contact Rate":       f"{k['contact_rate']:.1%}",
-                "Credit Rate":        f"{k['credit_rate']:.1%}",
-                "Pass Credit Rate":   f"{k['pass_credit_rate']:.1%}",
-                "Pass Credit Conv.":  f"{k['pass_credit_conv']:.1%}",
-                "Fail Credit Conv.":  f"{k['fail_credit_conv']:.1%}",
-                "Avg Talk Time":      f"{k['talk_time']:.1f}",
-                "Talk Time (Sold)":   f"{k['talk_time_sold']:.1f}",
-                "Talk Time (Unsold)": f"{k['talk_time_unsold']:.1f}",
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    ov_gran = st.radio(
+        "Granularity", PERIOD_OPTIONS, index=0, horizontal=True, key="overview_gran"
+    )
+
+    FUNNEL_METRICS = [
+        ("Calls",          "count"),
+        ("CiContact",      "pct"),
+        ("CiCredit",       "pct"),
+        ("PCR",            "pct"),
+        ("PCC",            "pct"),
+        ("FCC",            "pct"),
+        ("NC",             "pct"),
+        ("TPM",            "pct"),
+        ("Revenue",        "dollar"),
+        ("RPNC",           "dollar"),
+        ("RPO",            "dollar"),
+        ("Talk Time",      "decimal"),
+        ("Sold Talk Time", "decimal"),
+        ("Unsold Talk Time","decimal"),
+    ]
+
+    def compute_funnel_row(grp, metric):
+        n          = len(grp)
+        n_contact  = grp["ib_contact_calls"].sum()  if "ib_contact_calls"       in grp.columns else 0
+        n_credit   = grp["credit_calls_flag"].sum() if "credit_calls_flag"       in grp.columns else 0
+        n_pass_cr  = grp["passed_credit_call_flag"].sum() if "passed_credit_call_flag" in grp.columns else 0
+        n_fail_cr  = grp["failed_credit_call_flag"].sum() if "failed_credit_call_flag" in grp.columns else 0
+        n_pass_sale= grp["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in grp.columns else 0
+        n_fail_sale= grp["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in grp.columns else 0
+        n_orders   = grp["orders"].sum()            if "orders"                  in grp.columns else 0
+        n_tpsales  = grp["tpsales_flag"].sum()      if "tpsales_flag"            in grp.columns else 0
+        rev        = grp["total_revenue"].sum()     if "total_revenue"           in grp.columns else grp["gcv_fo"].sum() if "gcv_fo" in grp.columns else 0
+        tt_all     = grp["talk_time_minutes"].mean()    if "talk_time_minutes"   in grp.columns else float("nan")
+        tt_sold    = grp[grp["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in grp.columns and "orders" in grp.columns) else float("nan")
+        tt_unsold  = grp[grp["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in grp.columns and "orders" in grp.columns) else float("nan")
+
+        val_map = {
+            "Calls":           n,
+            "CiContact":       safe_rate(n_contact,   n),
+            "CiCredit":        safe_rate(n_credit,    n),
+            "PCR":             safe_rate(n_pass_cr,   n_credit),
+            "PCC":             safe_rate(n_pass_sale, n_pass_cr),
+            "FCC":             safe_rate(n_fail_sale, n_fail_cr),
+            "NC":              safe_rate(n_orders,    n),
+            "TPM":             safe_rate(n_tpsales,   n_orders),
+            "Revenue":         rev,
+            "RPNC":            safe_rate(rev,         n),
+            "RPO":             safe_rate(rev,         n_orders),
+            "Talk Time":       tt_all,
+            "Sold Talk Time":  tt_sold,
+            "Unsold Talk Time":tt_unsold,
+        }
+        return val_map.get(metric, float("nan"))
+
+    def fmt_funnel(val, fmt):
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return "—"
+        if fmt == "count":   return f"{int(val):,}"
+        if fmt == "pct":     return f"{val:.1%}"
+        if fmt == "dollar":  return f"${val:,.2f}"
+        return f"{val:.2f}"
+
+    if "call_date_est" in df.columns and len(df) > 0:
+        ft_df = df.dropna(subset=["call_date_est"]).copy()
+        ft_df["period"] = period_labels(ft_df["call_date_est"], ov_gran)
+        periods_sorted = sorted(ft_df["period"].unique())
+
+        # Build period display labels
+        period_disp = {p: pd.to_datetime(p).strftime(PERIOD_FMT[ov_gran]) for p in periods_sorted}
+
+        funnel_rows = []
+        for metric, fmt in FUNNEL_METRICS:
+            row = {"Metric": metric}
+            for p in periods_sorted:
+                grp = ft_df[ft_df["period"] == p]
+                row[period_disp[p]] = fmt_funnel(compute_funnel_row(grp, metric), fmt)
+            funnel_rows.append(row)
+
+        funnel_table = pd.DataFrame(funnel_rows)
+        st.dataframe(funnel_table, use_container_width=True, hide_index=True)
     else:
-        st.info("center_location column not found.")
+        st.info("No data available.")
 
     st.divider()
 
-    # ── Talk time breakdown bar ────────────────────────────────────────────────
-    st.subheader("Talk Time — Sold vs Unsold")
+    # ── Trend chart — shares granularity with funnel table ────────────────────
+    st.subheader("Trend Over Time")
 
-    if "talk_time_minutes" in df.columns and "orders" in df.columns and "center_location" in df.columns:
-        tt_rows = []
-        for center, grp in df.groupby("center_location"):
-            tt_rows.append({
-                "center": center,
-                "Sold":   grp[grp["orders"] > 0]["talk_time_minutes"].mean(),
-                "Unsold": grp[grp["orders"] == 0]["talk_time_minutes"].mean(),
-                "All":    grp["talk_time_minutes"].mean(),
-            })
-        tt_df = pd.DataFrame(tt_rows)
-
-        fig_tt = go.Figure()
-        for label, color in [("All", "#3d8ef8"), ("Sold", "#22c55e"), ("Unsold", "#f43f5e")]:
-            fig_tt.add_trace(go.Bar(
-                name=label, x=tt_df["center"], y=tt_df[label],
-                marker_color=color, marker_line_width=0,
-                text=tt_df[label].round(1).astype(str) + " min",
-                textposition="outside", textfont=dict(color="#8b95aa", size=11),
-            ))
-        apply_dark_theme(fig_tt,
-            barmode="group", yaxis_title="Minutes", height=300,
-            margin=dict(l=40, r=20, t=10, b=40),
-            legend=dict(orientation="h", y=-0.25),
+    tr_c1, tr_c2 = st.columns(2)
+    with tr_c1:
+        ov_metric_choice = st.selectbox(
+            "Metric",
+            ["Net Conversion", "Total Revenue", "Rev / Call", "Rev / Order",
+             "Top Product Mix", "Contact Rate", "Credit Rate",
+             "Passed Credit Rate", "Passed Credit Conv.", "Failed Credit Conv.",
+             "Talk Time", "Calls"],
+            key="ov_trend_metric",
         )
-        st.plotly_chart(fig_tt, use_container_width=True)
+    with tr_c2:
+        GROUP_COL_MAP = {
+            "Center":           "center_location",
+            "Marketing Bucket": "marketing_bucket",
+            "Mover / Switcher": "moverSwitcher",
+            "Tenure Bucket":    "tenure_bucket",
+            "Call Type":        "call_type",
+            "None (Overall)":   None,
+        }
+        ov_group_choice = st.selectbox(
+            "Group By",
+            options=list(GROUP_COL_MAP.keys()),
+            index=0,
+            key="ov_trend_group",
+        )
+        ov_group_col = GROUP_COL_MAP[ov_group_choice]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — TRENDS OVER TIME
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_trends:
-
-    granularity = st.radio(
-        "Granularity", PERIOD_OPTIONS, index=0, horizontal=True, key="trend_gran"
-    )
-
-    metric_choice = st.selectbox(
-        "Primary Metric",
-        ["Net Conversion", "Total Revenue", "Rev / Call", "Rev / Order",
-         "Top Product Mix", "Contact Rate", "Credit Rate",
-         "Passed Credit Rate", "Passed Credit Conv.", "Failed Credit Conv.",
-         "Talk Time", "Calls"],
-        key="trend_metric",
-    )
-
-    METRIC_MAP = {
-        "Net Conversion":      ("orders", "n_calls",  "pct"),
-        "Total Revenue":       ("total_revenue", None, "dollar"),
-        "Rev / Call":          ("total_revenue", "n_calls", "dollar"),
-        "Rev / Order":         ("total_revenue", "n_orders", "dollar"),
-        "Top Product Mix":     ("tpsales_flag", "orders", "pct"),
-        "Contact Rate":        ("ib_contact_calls", "n_calls", "pct"),
-        "Credit Rate":         ("credit_calls_flag", "n_calls", "pct"),
-        "Passed Credit Rate":  ("passed_credit_call_flag", "credit_calls_flag", "pct"),
-        "Passed Credit Conv.": ("passed_credit_sale_flag", "passed_credit_call_flag", "pct"),
-        "Failed Credit Conv.": ("failed_credit_sale_flag", "failed_credit_call_flag", "pct"),
-        "Talk Time":           ("talk_time_minutes", None, "decimal"),
-        "Calls":               (None, None, "count"),
+    METRIC_MAP_OV = {
+        "Net Conversion":      ("orders",                    "n_calls",             "pct"),
+        "Total Revenue":       ("total_revenue",              None,                  "dollar"),
+        "Rev / Call":          ("total_revenue",              "n_calls",             "dollar"),
+        "Rev / Order":         ("total_revenue",              "n_orders",            "dollar"),
+        "Top Product Mix":     ("tpsales_flag",               "orders",              "pct"),
+        "Contact Rate":        ("ib_contact_calls",           "n_calls",             "pct"),
+        "Credit Rate":         ("credit_calls_flag",          "n_calls",             "pct"),
+        "Passed Credit Rate":  ("passed_credit_call_flag",    "credit_calls_flag",   "pct"),
+        "Passed Credit Conv.": ("passed_credit_sale_flag",    "passed_credit_call_flag", "pct"),
+        "Failed Credit Conv.": ("failed_credit_sale_flag",    "failed_credit_call_flag", "pct"),
+        "Talk Time":           ("talk_time_minutes",          None,                  "decimal"),
+        "Calls":               (None,                         None,                  "count"),
     }
 
     if "call_date_est" in df.columns and len(df) > 0:
-        ts_df = df.dropna(subset=["call_date_est"]).copy()
-        ts_df["period"] = period_labels(ts_df["call_date_est"], granularity)
+        ov_ts_df = df.dropna(subset=["call_date_est"]).copy()
+        ov_ts_df["period"] = period_labels(ov_ts_df["call_date_est"], ov_gran)
 
-        num_col, denom_col, fmt = METRIC_MAP[metric_choice]
+        num_col_ov, denom_col_ov, fmt_ov = METRIC_MAP_OV[ov_metric_choice]
 
-        def agg_metric(grp):
-            if metric_choice == "Calls":
+        def agg_metric_ov(grp):
+            if ov_metric_choice == "Calls":
                 return len(grp)
-            elif metric_choice == "Talk Time":
+            elif ov_metric_choice == "Talk Time":
                 return grp["talk_time_minutes"].mean() if "talk_time_minutes" in grp.columns else float("nan")
-            elif metric_choice == "Total Revenue":
-                return grp["total_revenue"].sum() if "total_revenue" in grp.columns else grp["gcv_fo"].sum()
-            elif fmt == "dollar" and denom_col:
-                num = grp["total_revenue"].sum() if "total_revenue" in grp.columns else grp.get("gcv_fo", pd.Series([0])).sum()
-                if denom_col == "n_calls":     denom = len(grp)
-                elif denom_col == "n_orders":  denom = grp["orders"].sum() if "orders" in grp.columns else 0
-                else:                          denom = 0
+            elif ov_metric_choice == "Total Revenue":
+                return grp["total_revenue"].sum() if "total_revenue" in grp.columns else grp["gcv_fo"].sum() if "gcv_fo" in grp.columns else 0
+            elif fmt_ov == "dollar" and denom_col_ov:
+                num = grp["total_revenue"].sum() if "total_revenue" in grp.columns else 0
+                denom = len(grp) if denom_col_ov == "n_calls" else (grp["orders"].sum() if "orders" in grp.columns else 0)
                 return safe_rate(num, denom)
-            elif fmt == "pct":
-                if num_col in grp.columns:
-                    num = grp[num_col].sum()
+            elif fmt_ov == "pct":
+                if num_col_ov not in grp.columns:
+                    return float("nan")
+                num = grp[num_col_ov].sum()
+                if denom_col_ov == "n_calls":
+                    denom = len(grp)
+                elif denom_col_ov and denom_col_ov in grp.columns:
+                    denom = grp[denom_col_ov].sum()
                 else:
                     return float("nan")
-                if denom_col == "n_calls":   denom = len(grp)
-                elif denom_col and denom_col in grp.columns: denom = grp[denom_col].sum()
-                else: return float("nan")
                 return safe_rate(num, denom)
             return float("nan")
 
-        # Overall trend
-        ts_overall = (
-            ts_df.groupby("period")
-            .apply(agg_metric)
+        ov_ts_overall = (
+            ov_ts_df.groupby("period")
+            .apply(agg_metric_ov)
             .reset_index()
             .rename(columns={0: "value"})
-            .sort_values("period")
         )
-        ts_overall["period_display"] = period_display(ts_overall["period"], granularity)
+        ov_ts_overall["period"] = pd.to_datetime(ov_ts_overall["period"])
+        ov_ts_overall = ov_ts_overall.sort_values("period")
+        ov_ts_overall["period_display"] = ov_ts_overall["period"].dt.strftime(PERIOD_FMT[ov_gran])
 
-        fig_trend = go.Figure()
+        fig_ov_trend = go.Figure()
 
-        # Split by center if available
-        if "center_location" in ts_df.columns:
-            for center, grp_c in ts_df.groupby("center_location"):
+        if ov_group_col and ov_group_col in ov_ts_df.columns:
+            for group_val, grp_c in ov_ts_df.groupby(ov_group_col):
                 ts_c = (
                     grp_c.groupby("period")
-                    .apply(agg_metric)
+                    .apply(agg_metric_ov)
                     .reset_index()
                     .rename(columns={0: "value"})
-                    .sort_values("period")
                 )
-                ts_c["period_display"] = period_display(ts_c["period"], granularity)
-                fig_trend.add_trace(go.Scatter(
-                    x=ts_c["period_display"], y=ts_c["value"],
-                    name=center, mode="lines+markers",
+                ts_c["period"] = pd.to_datetime(ts_c["period"])
+                ts_c = ts_c.sort_values("period")
+                fig_ov_trend.add_trace(go.Scatter(
+                    x=ts_c["period"], y=ts_c["value"],
+                    name=str(group_val), mode="lines+markers",
                     line=dict(width=2), marker=dict(size=5),
                 ))
 
-        fig_trend.add_trace(go.Scatter(
-            x=ts_overall["period_display"], y=ts_overall["value"],
+        # Always show overall as dotted line
+        fig_ov_trend.add_trace(go.Scatter(
+            x=ov_ts_overall["period"], y=ov_ts_overall["value"],
             name="Overall", mode="lines+markers",
             line=dict(width=2, dash="dot", color="#8b95aa"),
             marker=dict(size=5, color="#8b95aa"),
         ))
 
-        is_pct    = fmt == "pct"
-        is_dollar = fmt == "dollar"
-        apply_dark_theme(fig_trend,
-            yaxis_tickformat=".1%" if is_pct else ("$,.0f" if is_dollar else ".2f"),
-            yaxis_tickprefix="$" if is_dollar else "",
-            height=380,
+        # Use datetime x-axis with formatted tick labels — guarantees chronological order
+        tick_vals = ov_ts_overall["period"].tolist()
+        tick_text = ov_ts_overall["period"].dt.strftime(PERIOD_FMT[ov_gran]).tolist()
+
+        apply_dark_theme(fig_ov_trend,
+            yaxis_tickformat=".1%" if fmt_ov == "pct" else ("$,.0f" if fmt_ov == "dollar" else ".2f"),
+            yaxis_tickprefix="$" if fmt_ov == "dollar" else "",
+            xaxis=dict(
+                tickvals=tick_vals,
+                ticktext=tick_text,
+                gridcolor="#1e2330",
+                linecolor="#252b3a",
+                tickcolor="#252b3a",
+            ),
+            height=360,
             margin=dict(l=50, r=20, t=10, b=40),
             legend=dict(orientation="h", y=-0.2),
         )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_ov_trend, use_container_width=True)
     else:
         st.info("No data available for trend chart.")
 
-    st.divider()
-
-    # ── Revenue & Volume dual axis ─────────────────────────────────────────────
-    st.subheader("Revenue & Call Volume")
-
-    if "call_date_est" in df.columns and "total_revenue" in df.columns:
-        rv_df = df.dropna(subset=["call_date_est"]).copy()
-        rv_df["period"] = period_labels(rv_df["call_date_est"], granularity)
-
-        rv_ts = (
-            rv_df.groupby("period")
-            .agg(revenue=("total_revenue", "sum"), calls=("call_id", "count"))
-            .reset_index()
-            .sort_values("period")
-        )
-        rv_ts["period_display"] = period_display(rv_ts["period"], granularity)
-
-        fig_rv = go.Figure()
-        fig_rv.add_trace(go.Bar(
-            x=rv_ts["period_display"], y=rv_ts["revenue"],
-            name="Revenue", marker_color="rgba(61,142,248,0.5)",
-            marker_line_width=0, yaxis="y",
-        ))
-        fig_rv.add_trace(go.Scatter(
-            x=rv_ts["period_display"], y=rv_ts["calls"],
-            name="Calls", mode="lines+markers",
-            line=dict(color="#22d3c8", width=2),
-            marker=dict(size=5), yaxis="y2",
-        ))
-        apply_dark_theme(fig_rv,
-            yaxis=dict(title="Revenue ($)", tickprefix="$", gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a"),
-            yaxis2=dict(title="Calls", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)", linecolor="#252b3a", tickcolor="#252b3a"),
-            barmode="overlay",
-            height=340,
-            margin=dict(l=60, r=60, t=10, b=40),
-            legend=dict(orientation="h", y=-0.2),
-        )
-        st.plotly_chart(fig_rv, use_container_width=True)
-
-    st.divider()
-
-    # ── Marketing bucket breakdown ─────────────────────────────────────────────
-    st.subheader("Conversion by Marketing Bucket Over Time")
-
-    if "marketing_bucket" in df.columns and "call_date_est" in df.columns:
-        mb_df = df.dropna(subset=["call_date_est", "marketing_bucket"]).copy()
-        mb_df["period"] = period_labels(mb_df["call_date_est"], granularity)
-
-        mb_ts = (
-            mb_df.groupby(["period", "marketing_bucket"])
-            .apply(lambda g: safe_rate(g["orders"].sum() if "orders" in g.columns else 0, len(g)))
-            .reset_index()
-            .rename(columns={0: "conv"})
-            .sort_values("period")
-        )
-        mb_ts["period_display"] = period_display(mb_ts["period"], granularity)
-
-        top_buckets = mb_df["marketing_bucket"].value_counts().head(6).index.tolist()
-        mb_ts = mb_ts[mb_ts["marketing_bucket"].isin(top_buckets)]
-
-        fig_mb = go.Figure()
-        for bucket in top_buckets:
-            sub = mb_ts[mb_ts["marketing_bucket"] == bucket]
-            fig_mb.add_trace(go.Scatter(
-                x=sub["period_display"], y=sub["conv"],
-                name=bucket, mode="lines+markers",
-                line=dict(width=2), marker=dict(size=5),
-            ))
-        apply_dark_theme(fig_mb,
-            yaxis_tickformat=".1%",
-            height=320,
-            margin=dict(l=50, r=20, t=10, b=40),
-            legend=dict(orientation="h", y=-0.25),
-        )
-        st.plotly_chart(fig_mb, use_container_width=True)
-        st.caption("Top 6 marketing buckets by call volume · Net Conversion rate over time")
-
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ARCADIA VS ATOM
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_cohort:
-
-    if "membership" not in df.columns:
-        st.info("membership column not found in data.")
-    else:
-        arcadia_df = df[df["membership"] == "Arcadia"]
-        atom_df    = df[df["membership"] == "Atomizer"]
-
-        arc_kpis  = compute_kpis(arcadia_df)
-        atom_kpis = compute_kpis(atom_df)
-
-        def pct_delta(a, b):
-            if pd.isna(a) or pd.isna(b) or b == 0: return None
-            return f"{(a / b - 1) * 100:+.1f}% vs Atom"
-
-        st.subheader("Arcadia vs Atom — Current Period")
-
-        KPI_SPECS = [
-            ("Calls",             "n_calls",        "count"),
-            ("Net Conversion",    "net_conversion",  "pct"),
-            ("Top Product Mix",   "top_product_mix", "pct"),
-            ("Total Revenue",     "total_revenue",   "dollar"),
-            ("Rev / Call",        "rev_per_call",    "dollar"),
-            ("Rev / Order",       "rev_per_order",   "dollar"),
-            ("Contact Rate",      "contact_rate",    "pct"),
-            ("Credit Rate",       "credit_rate",     "pct"),
-            ("Pass Credit Rate",  "pass_credit_rate","pct"),
-            ("Pass Credit Conv.", "pass_credit_conv","pct"),
-            ("Fail Credit Conv.", "fail_credit_conv","pct"),
-            ("Talk Time",         "talk_time",       "decimal"),
-        ]
-
-        # Row 1: core KPIs
-        cols = st.columns(4)
-        for i, (label, key, fmt) in enumerate(KPI_SPECS[:4]):
-            a_val = arc_kpis[key]
-            b_val = atom_kpis[key]
-            if fmt == "count":
-                a_str = f"{a_val:,}"
-            elif fmt == "pct":
-                a_str = f"{a_val:.1%}"
-            elif fmt == "dollar":
-                a_str = f"${a_val:,.2f}"
-            else:
-                a_str = f"{a_val:.2f}"
-            cols[i % 4].metric(f"Arcadia — {label}", a_str, delta=pct_delta(a_val, b_val))
-
-        cols2 = st.columns(4)
-        for i, (label, key, fmt) in enumerate(KPI_SPECS[4:8]):
-            a_val = arc_kpis[key]
-            b_val = atom_kpis[key]
-            if fmt == "pct":    a_str = f"{a_val:.1%}"
-            elif fmt == "dollar": a_str = f"${a_val:,.2f}"
-            else: a_str = f"{a_val:.2f}"
-            cols2[i % 4].metric(f"Arcadia — {label}", a_str, delta=pct_delta(a_val, b_val))
-
-        st.divider()
-
-        # ── Side-by-side comparison bar chart ─────────────────────────────────
-        st.subheader("Head-to-Head Comparison")
-
-        cmp_metric = st.selectbox(
-            "Metric",
-            ["Net Conversion", "Top Product Mix", "Rev / Call", "Rev / Order",
-             "Contact Rate", "Credit Rate", "Passed Credit Rate",
-             "Passed Credit Conv.", "Talk Time"],
-            key="cohort_cmp_metric",
-        )
-
-        METRIC_KEY_MAP = {
-            "Net Conversion":      ("net_conversion",  "pct"),
-            "Top Product Mix":     ("top_product_mix", "pct"),
-            "Rev / Call":          ("rev_per_call",    "dollar"),
-            "Rev / Order":         ("rev_per_order",   "dollar"),
-            "Contact Rate":        ("contact_rate",    "pct"),
-            "Credit Rate":         ("credit_rate",     "pct"),
-            "Passed Credit Rate":  ("pass_credit_rate","pct"),
-            "Passed Credit Conv.": ("pass_credit_conv","pct"),
-            "Talk Time":           ("talk_time",       "decimal"),
-        }
-        mk, mfmt = METRIC_KEY_MAP[cmp_metric]
-
-        granularity_c = st.radio("Granularity", PERIOD_OPTIONS, index=0, horizontal=True, key="cohort_gran")
-
-        if "call_date_est" in df.columns:
-            coh_fig = go.Figure()
-            for cohort_label, cohort_data, color in [
-                ("Arcadia", arcadia_df, "#3d8ef8"),
-                ("Atom",    atom_df,    "#22d3c8"),
-            ]:
-                tmp = cohort_data.dropna(subset=["call_date_est"]).copy()
-                if tmp.empty:
-                    continue
-                tmp["period"] = period_labels(tmp["call_date_est"], granularity_c)
-
-                def _agg_cohort(grp):
-                    k = compute_kpis(grp)
-                    return k[mk]
-
-                ts_c = (
-                    tmp.groupby("period")
-                    .apply(_agg_cohort)
-                    .reset_index()
-                    .rename(columns={0: "value"})
-                    .sort_values("period")
-                )
-                ts_c["period_display"] = period_display(ts_c["period"], granularity_c)
-                coh_fig.add_trace(go.Scatter(
-                    x=ts_c["period_display"], y=ts_c["value"],
-                    name=cohort_label, mode="lines+markers",
-                    line=dict(color=color, width=2), marker=dict(size=5, color=color),
-                ))
-
-            apply_dark_theme(coh_fig,
-                yaxis_tickformat=".1%" if mfmt == "pct" else ("$,.2f" if mfmt == "dollar" else ".2f"),
-                yaxis_tickprefix="$" if mfmt == "dollar" else "",
-                height=340,
-                margin=dict(l=50, r=20, t=10, b=40),
-                legend=dict(orientation="h", y=-0.2),
-            )
-            st.plotly_chart(coh_fig, use_container_width=True)
-
-        st.divider()
-
-        # ── Full KPI comparison table ──────────────────────────────────────────
-        st.subheader("Full KPI Table — Arcadia vs Atom")
-
-        def fmt_kpi(val, fmt):
-            if pd.isna(val): return "—"
-            if fmt == "count":  return f"{val:,}"
-            if fmt == "pct":    return f"{val:.1%}"
-            if fmt == "dollar": return f"${val:,.2f}"
-            return f"{val:.2f}"
-
-        def delta_kpi(a, b, fmt):
-            if pd.isna(a) or pd.isna(b) or b == 0: return "—"
-            pct = (a / b - 1) * 100
-            return f"{pct:+.1f}%"
-
-        cmp_rows = []
-        for label, key, fmt in KPI_SPECS:
-            a_v = arc_kpis[key]
-            b_v = atom_kpis[key]
-            cmp_rows.append({
-                "KPI":     label,
-                "Arcadia": fmt_kpi(a_v, fmt),
-                "Atom":    fmt_kpi(b_v, fmt),
-                "Delta (Arcadia vs Atom)": delta_kpi(a_v, b_v, fmt),
-            })
-
-        cmp_df = pd.DataFrame(cmp_rows)
-
-        def color_delta(val):
-            if val == "—": return ""
-            try:
-                num = float(val.replace("%", "").replace("+", ""))
-            except Exception:
-                return ""
-            if abs(num) < 2:   return "background-color: #2a2a1a; color: #c8a000"
-            if num > 0:        return "background-color: #0f2a1a; color: #22c55e"
-            return "background-color: #2a1018; color: #f43f5e"
-
-        styler = cmp_df.style.map(color_delta, subset=["Delta (Arcadia vs Atom)"])
-        st.dataframe(styler, use_container_width=True, hide_index=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — AGENT LEVEL
+# TAB — AGENT LEVEL
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_agent:
 
@@ -939,3 +736,644 @@ with tab_agent:
         fmt_df["Calls"] = fmt_df["Calls"].apply(lambda x: f"{x:,}")
 
         st.dataframe(fmt_df, use_container_width=True, hide_index=True)
+
+with tab_lift:
+
+    CENTER_CONFIG = {
+        "Jamaica": {
+            "file":       "data/lift_jamaica",
+            "pre_start":  "2026-01-05",
+            "pre_end":    "2026-03-01",
+            "post_start": "2026-03-09",
+            "post_end":   "2026-04-19",
+        },
+        "Durban": {
+            "file":       "data/lift_durban",
+            "pre_start":  "2026-02-16",
+            "pre_end":    "2026-04-08",
+            "post_start": "2026-04-09",
+            "post_end":   "2026-04-28",
+        },
+    }
+
+    LIFT_KPI_SPECS = [
+        ("contact_rate",      "Contact Rate",        "pct"),
+        ("credit_rate",       "Calls Into Credit",   "pct"),
+        ("pass_credit_rate",  "Passed Credit Rate",  "pct"),
+        ("pass_credit_conv",  "Passed Credit Conv.", "pct"),
+        ("fail_credit_conv",  "Failed Credit Conv.", "pct"),
+        ("nc",                "Net Conversion",      "pct"),
+        ("rpo",               "RPO",                 "dollar"),
+        ("rpnc",              "RPNC",                "dollar"),
+        ("tt",                "Talk Time",           "decimal"),
+        ("cm_call",           "CM / Call",           "dollar"),
+    ]
+    LIFT_KPI_KEYS   = [k for k, _, _ in LIFT_KPI_SPECS]
+    LIFT_KPI_LABELS = {k: lbl for k, lbl, _ in LIFT_KPI_SPECS}
+    LIFT_KPI_FMTS   = {k: fmt for k, _, fmt in LIFT_KPI_SPECS}
+    CM_COST_PER_MIN = 0.4
+
+    # ── Center selector ────────────────────────────────────────────────────────
+    lift_center = st.selectbox(
+        "Center", options=list(CENTER_CONFIG.keys()), key="lift_center"
+    )
+    cfg = CENTER_CONFIG[lift_center]
+
+    # ── Load CSV ───────────────────────────────────────────────────────────────
+    @st.cache_data(ttl="24h")
+    def load_lift_data(file_base):
+        import glob
+        chunks = []
+
+        # Fixed files
+        for period_label in ["post", "pre"]:
+            path = f"{file_base}_{period_label}.csv"
+            try:
+                chunks.append(pd.read_csv(path, low_memory=False))
+            except Exception as e:
+                st.error(f"Could not load {path}: {e}")
+                st.stop()
+
+        # pre_weekly — variable number of split files
+        pre_weekly_files = sorted(glob.glob(f"{file_base}_pre_weekly_*.csv"))
+        if not pre_weekly_files:
+            st.error(f"No pre_weekly files found matching {file_base}_pre_weekly_*.csv")
+            st.stop()
+        for path in pre_weekly_files:
+            try:
+                chunks.append(pd.read_csv(path, low_memory=False))
+            except Exception as e:
+                st.error(f"Could not load {path}: {e}")
+                st.stop()
+
+        df = pd.concat(chunks, ignore_index=True)
+        df["call_datetime_est"] = pd.to_datetime(df["call_datetime_est"])
+        df["call_date_fo"]      = pd.to_datetime(df["call_date_fo"])
+        for col in ["talk_time_minutes", "order_orders", "gcv_revenue", "ibcalls",
+                    "credit_calls_ind", "passed_credit_call_ind", "ib_contact_calls",
+                    "passed_credit_sale", "failed_credit_sale"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
+    try:
+        lift_raw = load_lift_data(cfg["file"])
+    except Exception as e:
+        st.error(f"Could not load lift data for {lift_center}: {e}")
+        st.stop()
+
+    # ── Durban week exclusion ──────────────────────────────────────────────────
+    DURBAN_EXCLUDE_WEEK = "02/23/2026"
+    exclude_feb23 = False
+    if lift_center == "Durban":
+        exclude_feb23 = st.checkbox(
+            "Exclude week of 2/23 (Kingston test not yet launched)",
+            value=False,
+            key="lift_exclude_feb23",
+        )
+
+    # ── Tab-level date filter ──────────────────────────────────────────────────
+    # Independent of the sidebar date filter. Scopes both pre_weekly and post
+    # rows to the selected post date range. Pre_weekly rows are scoped by
+    # post_week (the post week they serve as baseline for), not by their own
+    # call date, so narrowing the post window automatically narrows the
+    # pre baselines too.
+    st.subheader("Date Range")
+    post_dates = pd.to_datetime(
+        lift_raw[lift_raw["period"] == "post"]["call_datetime_est"]
+    )
+    min_post_date = post_dates.min().date()
+    max_post_date = post_dates.max().date()
+
+    lift_date_col1, lift_date_col2 = st.columns(2)
+    with lift_date_col1:
+        lift_start_date = st.date_input(
+            "Post period from",
+            value=min_post_date,
+            min_value=min_post_date,
+            max_value=max_post_date,
+            key="lift_start_date",
+        )
+    with lift_date_col2:
+        lift_end_date = st.date_input(
+            "Post period to",
+            value=max_post_date,
+            min_value=min_post_date,
+            max_value=max_post_date,
+            key="lift_end_date",
+        )
+
+    # ── Apply sidebar filters to ALL periods equally ───────────────────────────
+    # pre_weekly, post, and pre (canonical) are all filtered the same way.
+    # This means the summary table shows lift for the filtered call population
+    # in both the pre baseline and post period — enabling slices by customer
+    # type, marketing bucket, etc.
+    # Cohort assignment is NOT re-derived after filtering — it was fixed at
+    # extract time from the full unfiltered post population, ensuring agents
+    # are in the same cohorts regardless of what filter is active.
+    def apply_sidebar_filters(df):
+        if sel_mkt      and "marketing_bucket" in df.columns:
+            df = df[df["marketing_bucket"].isin(sel_mkt)]
+        if sel_mov      and "mover_switcher"   in df.columns:
+            df = df[df["mover_switcher"].isin(sel_mov)]
+        if sel_calltype and "call_type"        in df.columns:
+            df = df[df["call_type"].isin(sel_calltype)]
+        if sel_tenure   and "tenure_bucket"    in df.columns:
+            df = df[df["tenure_bucket"].isin(sel_tenure)]
+        return df
+
+    # Date filter for post rows: restrict to selected post date window.
+    # For pre_weekly rows: restrict by post_week falling within the selected
+    # window, so the pre baselines stay aligned with the visible post weeks.
+    active_post_weeks = (
+        lift_raw[
+            (lift_raw["period"] == "post") &
+            (lift_raw["call_datetime_est"].dt.date >= lift_start_date) &
+            (lift_raw["call_datetime_est"].dt.date <= lift_end_date)
+        ]["week"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    pre_weekly_base = lift_raw[
+        (lift_raw["period"] == "pre_weekly") &
+        (lift_raw["post_week"].isin(active_post_weeks))
+    ].copy()
+
+    post_base = lift_raw[
+        (lift_raw["period"] == "post") &
+        (lift_raw["call_datetime_est"].dt.date >= lift_start_date) &
+        (lift_raw["call_datetime_est"].dt.date <= lift_end_date)
+    ].copy()
+
+    other_base = lift_raw[
+        (lift_raw["period"] == "pre") &
+        (lift_raw["call_datetime_est"].dt.date >= pd.to_datetime(cfg["pre_start"]).date()) &
+        (lift_raw["call_datetime_est"].dt.date <= pd.to_datetime(cfg["pre_end"]).date())
+    ].copy()
+
+    pre_weekly_raw = apply_sidebar_filters(pre_weekly_base)
+    lf             = apply_sidebar_filters(
+        pd.concat([post_base, other_base], ignore_index=True)
+    )
+
+    if exclude_feb23:
+        pre_weekly_raw = pre_weekly_raw[
+            pre_weekly_raw["post_week"] != DURBAN_EXCLUDE_WEEK
+        ]
+        lf = lf[lf["week"] != DURBAN_EXCLUDE_WEEK]
+
+    # post rows — cohort fixed by Spark at extract time
+    post_tagged = lf[(lf["period"] == "post") & lf["cohort"].notna()].copy()
+
+    # pre canonical rows — for trend chart only
+    pre_tagged = lf[(lf["period"] == "pre") & lf["canonical_cohort"].notna()].copy()
+    pre_tagged = pre_tagged.drop(columns=["cohort"], errors="ignore")
+    pre_tagged = pre_tagged.rename(columns={"canonical_cohort": "cohort"})
+
+    # ── KPI computation ────────────────────────────────────────────────────────
+    def safe_rate(num, den):
+        try:
+            return float(num) / float(den) if den and float(den) != 0 else float("nan")
+        except Exception:
+            return float("nan")
+
+    def compute_lift_kpis(d):
+        ib     = d["ibcalls"] == 1
+        ib_mob = ib | (d["call_direction"] == "MANUAL_OUTBOUND")
+        ib_d   = d[ib]
+
+        net_call      = ib.sum()
+        orders        = d.loc[ib_mob, "order_orders"].sum()
+        revenue       = d.loc[ib_mob, "gcv_revenue"].sum()
+        tt_avg        = safe_rate(ib_d["talk_time_minutes"].sum(), net_call)
+        contact_calls = ib_d["ib_contact_calls"].sum()       if "ib_contact_calls"       in d.columns else 0
+        credit_calls  = ib_d["credit_calls_ind"].sum()       if "credit_calls_ind"        in d.columns else 0
+        pass_cr_calls = int((ib_d["passed_credit_call_ind"] == 1).sum()) \
+                        if "passed_credit_call_ind" in d.columns else 0
+        fail_cr_calls = int(
+            ((ib_d["credit_calls_ind"] == 1) & (ib_d["passed_credit_call_ind"] != 1)).sum()
+        ) if "credit_calls_ind" in d.columns and "passed_credit_call_ind" in d.columns else 0
+        pass_cr_sold  = int(
+            ((ib_d["passed_credit_call_ind"] == 1) & (ib_d["order_orders"] > 0)).sum()
+        ) if "passed_credit_call_ind" in d.columns else 0
+        fail_cr_sold  = int(
+            (
+                (ib_d["credit_calls_ind"] == 1) &
+                (ib_d["passed_credit_call_ind"] != 1) &
+                (ib_d["order_orders"] > 0)
+            ).sum()
+        ) if "credit_calls_ind" in d.columns and "passed_credit_call_ind" in d.columns else 0
+
+        rpnc = safe_rate(revenue, net_call)
+        return {
+            "net_call":         net_call,
+            "orders":           orders,
+            "revenue":          revenue,
+            "contact_rate":     safe_rate(contact_calls, net_call),
+            "credit_rate":      safe_rate(credit_calls,  net_call),
+            "pass_credit_rate": safe_rate(pass_cr_calls, credit_calls),
+            "pass_credit_conv": safe_rate(pass_cr_sold,  pass_cr_calls),
+            "fail_credit_conv": safe_rate(fail_cr_sold,  fail_cr_calls),
+            "nc":               safe_rate(orders,        net_call),
+            "rpo":              safe_rate(revenue,       orders),
+            "rpnc":             rpnc,
+            "tt":               tt_avg,
+            "cm_call":          rpnc - CM_COST_PER_MIN * tt_avg
+                                if not (pd.isna(rpnc) or pd.isna(tt_avg))
+                                else float("nan"),
+        }
+
+    def safe_delta_pct(arc, atom):
+        if pd.isna(arc) or pd.isna(atom) or atom == 0:
+            return float("nan")
+        return arc / atom - 1
+
+    # ── Weighted-average summary ───────────────────────────────────────────────
+    post_weeks = sorted(post_tagged["week"].dropna().unique())
+
+    weekly_records = []
+    for wk in post_weeks:
+        post_wk_arc  = post_tagged[
+            (post_tagged["week"] == wk) & (post_tagged["cohort"] == "Arcadia")
+        ]
+        post_wk_atom = post_tagged[
+            (post_tagged["week"] == wk) & (post_tagged["cohort"] == "Atom")
+        ]
+        pre_wk_arc   = pre_weekly_raw[
+            (pre_weekly_raw["post_week"] == wk) & (pre_weekly_raw["cohort"] == "Arcadia")
+        ]
+        pre_wk_atom  = pre_weekly_raw[
+            (pre_weekly_raw["post_week"] == wk) & (pre_weekly_raw["cohort"] == "Atom")
+        ]
+
+        if any(x.empty for x in [post_wk_arc, post_wk_atom, pre_wk_arc, pre_wk_atom]):
+            continue
+
+        post_arc_k  = compute_lift_kpis(post_wk_arc)
+        post_atom_k = compute_lift_kpis(post_wk_atom)
+        pre_arc_k   = compute_lift_kpis(pre_wk_arc)
+        pre_atom_k  = compute_lift_kpis(pre_wk_atom)
+
+        week_weight = (
+            int((post_wk_arc["ibcalls"]  == 1).sum()) +
+            int((post_wk_atom["ibcalls"] == 1).sum())
+        )
+
+        rec = {"week": wk, "weight": week_weight}
+        for k in LIFT_KPI_KEYS:
+            pre_d  = safe_delta_pct(
+                pre_arc_k.get(k,  float("nan")),
+                pre_atom_k.get(k, float("nan"))
+            )
+            post_d = safe_delta_pct(
+                post_arc_k.get(k, float("nan")),
+                post_atom_k.get(k, float("nan"))
+            )
+            rec[f"pre_arc_{k}"]    = pre_arc_k.get(k,   float("nan"))
+            rec[f"pre_atom_{k}"]   = pre_atom_k.get(k,  float("nan"))
+            rec[f"post_arc_{k}"]   = post_arc_k.get(k,  float("nan"))
+            rec[f"post_atom_{k}"]  = post_atom_k.get(k, float("nan"))
+            rec[f"pre_delta_{k}"]  = pre_d
+            rec[f"post_delta_{k}"] = post_d
+            rec[f"swing_{k}"]      = (
+                post_d - pre_d
+                if not (pd.isna(post_d) or pd.isna(pre_d))
+                else float("nan")
+            )
+        weekly_records.append(rec)
+
+    weekly_df = pd.DataFrame(weekly_records)
+
+    def weighted_avg(col):
+        if weekly_df.empty:
+            return float("nan")
+        valid = weekly_df[["weight", col]].dropna()
+        if valid.empty or valid["weight"].sum() == 0:
+            return float("nan")
+        return (valid[col] * valid["weight"]).sum() / valid["weight"].sum()
+
+    n_weeks      = len(weekly_df)
+    total_weight = int(weekly_df["weight"].sum()) if not weekly_df.empty else 0
+
+    # ── Section 1: KPI cards ───────────────────────────────────────────────────
+    st.subheader(f"{lift_center} — Test Period Lift Summary")
+
+    # Show a notice when filters are active so users understand the
+    # pre baseline is also scoped to the filtered call population
+    active_filters = []
+    if sel_mkt:      active_filters.append(f"Marketing: {', '.join(sel_mkt)}")
+    if sel_mov:      active_filters.append(f"Mover/Switcher: {', '.join(sel_mov)}")
+    if sel_calltype: active_filters.append(f"Call Type: {', '.join(sel_calltype)}")
+    if sel_tenure:   active_filters.append(f"Tenure: {', '.join(sel_tenure)}")
+
+    caption_base = (
+        f"Pre: {cfg['pre_start']} → {cfg['pre_end']}  ·  "
+        f"Post: {cfg['post_start']} → {cfg['post_end']}  ·  "
+        f"Weighted avg of {n_weeks} weekly swings  ·  "
+        f"Weight = post IB calls/week  ·  "
+        f"Total post IB calls: {total_weight:,}"
+    )
+    if active_filters:
+        caption_base += f"  ·  Filters active: {' | '.join(active_filters)}"
+        caption_base += "  ·  Pre baseline scoped to same filtered call types"
+
+    st.caption(caption_base)
+
+    def fmt_swing_metric(k):
+        s      = weighted_avg(f"swing_{k}")
+        post_d = weighted_avg(f"post_delta_{k}")
+        if pd.isna(s):
+            return "—", None
+        sign      = "+" if s > 0 else ""
+        post_sign = "+" if not pd.isna(post_d) and post_d > 0 else ""
+        return (
+            f"{sign}{s*100:.1f}pp swing",
+            f"Post Δ: {post_sign}{post_d*100:.1f}pp" if not pd.isna(post_d) else None,
+        )
+
+    top_kpis = [
+        ("rpnc",        "RPNC"),
+        ("nc",          "Net Conversion"),
+        ("rpo",         "RPO"),
+        ("credit_rate", "Calls Into Credit"),
+        ("tt",          "Talk Time"),
+    ]
+    kc = st.columns(5)
+    for i, (k, lbl) in enumerate(top_kpis):
+        val, delta = fmt_swing_metric(k)
+        kc[i].metric(lbl, val, delta=delta)
+
+    st.divider()
+
+    # ── Section 2: Summary table ───────────────────────────────────────────────
+    st.subheader("Pre vs Post Summary Table")
+    st.caption(
+        "All values are weighted averages across post weeks, "
+        "weighted by total post IB calls per week. "
+        "Pre baseline uses the same filters as the post period."
+    )
+
+    def fmt_kpi_val(k, v):
+        if pd.isna(v):
+            return "—"
+        fmt = LIFT_KPI_FMTS[k]
+        if fmt == "pct":    return f"{v:.1%}"
+        if fmt == "dollar": return f"${v:,.1f}"
+        return f"{v:.2f}"
+
+    def fmt_delta_cell(v):
+        if pd.isna(v):
+            return "—"
+        sign = "+" if v > 0 else ""
+        return f"{sign}{v*100:.1f}%"
+
+    table_rows = []
+    for k, lbl, _ in LIFT_KPI_SPECS:
+        table_rows.append({
+            "KPI":            lbl,
+            "Pre — Arcadia":  fmt_kpi_val(k, weighted_avg(f"pre_arc_{k}")),
+            "Pre — Atom":     fmt_kpi_val(k, weighted_avg(f"pre_atom_{k}")),
+            "Pre Δ":          fmt_delta_cell(weighted_avg(f"pre_delta_{k}")),
+            "Post — Arcadia": fmt_kpi_val(k, weighted_avg(f"post_arc_{k}")),
+            "Post — Atom":    fmt_kpi_val(k, weighted_avg(f"post_atom_{k}")),
+            "Post Δ":         fmt_delta_cell(weighted_avg(f"post_delta_{k}")),
+            "Swing":          fmt_delta_cell(weighted_avg(f"swing_{k}")),
+        })
+
+    def color_swing(val):
+        if val == "—":
+            return ""
+        try:
+            num = float(val.replace("%", "").replace("+", ""))
+        except Exception:
+            return ""
+        if abs(num) < 1: return "background-color: #2a2a1a; color: #c8a000"
+        if num > 0:      return "background-color: #0f2a1a; color: #22c55e"
+        return "background-color: #2a1018; color: #f43f5e"
+
+    summary_tbl = pd.DataFrame(table_rows)
+    styler = summary_tbl.style.map(color_swing, subset=["Post Δ", "Swing"])
+    st.dataframe(styler, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Section 3: Trend chart ─────────────────────────────────────────────────
+    st.subheader("Trend Over Time")
+    st.caption(
+        "Solid lines = Arcadia, dashed = Atom. "
+        "Use 'View' to plot raw KPI values, Post Δ, or Swing. "
+        "Sidebar filters apply to both pre and post."
+    )
+
+    lt_c1, lt_c2, lt_c3 = st.columns(3)
+    with lt_c1:
+        lift_metric     = st.selectbox(
+            "Metric",
+            options=[lbl for _, lbl, _ in LIFT_KPI_SPECS],
+            key="lift_metric",
+        )
+        lift_metric_key = {lbl: k for k, lbl, _ in LIFT_KPI_SPECS}[lift_metric]
+        lift_metric_fmt = LIFT_KPI_FMTS[lift_metric_key]
+    with lt_c2:
+        LIFT_GROUP_MAP = {
+            "None (Overall)":   None,
+            "Marketing Bucket": "marketing_bucket",
+            "Mover / Switcher": "mover_switcher",
+            "Tenure Bucket":    "tenure_bucket",
+            "Call Type":        "call_type",
+        }
+        lift_group_choice = st.selectbox(
+            "Group By",
+            options=list(LIFT_GROUP_MAP.keys()),
+            key="lift_group",
+        )
+        lift_group_col = LIFT_GROUP_MAP[lift_group_choice]
+    with lt_c3:
+        lift_view = st.selectbox(
+            "View",
+            options=["Raw KPI Value", "Post Δ (Arc/Atom−1)", "Swing (Post Δ − Pre Δ)"],
+            key="lift_view",
+        )
+
+    def weekly_kpis_for_cohort(df_tagged, cohort, group_col=None):
+        sub = df_tagged[df_tagged["cohort"] == cohort].copy()
+        if sub.empty:
+            return pd.DataFrame()
+        group_cols = ["week"] + ([group_col] if group_col else [])
+        rows = []
+        for keys, grp in sub.groupby(group_cols):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            kpis = compute_lift_kpis(grp)
+            row  = dict(zip(group_cols, keys))
+            row["cohort"] = cohort
+            row["value"]  = kpis.get(lift_metric_key, float("nan"))
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def pre_kpi_for_cohort(cohort, group_col=None, group_val=None):
+        sub = pre_tagged[pre_tagged["cohort"] == cohort]
+        if group_col and group_val:
+            sub = sub[sub[group_col] == group_val]
+        return compute_lift_kpis(sub).get(lift_metric_key, float("nan"))
+
+    post_arc_weekly  = weekly_kpis_for_cohort(post_tagged, "Arcadia", lift_group_col)
+    post_atom_weekly = weekly_kpis_for_cohort(post_tagged, "Atom",    lift_group_col)
+
+    def build_trend_series(post_arc_w, post_atom_w, view, group_col):
+        traces     = []
+        group_vals = [None]
+        if group_col:
+            all_vals = pd.concat([
+                post_arc_w[group_col]
+                    if not post_arc_w.empty  and group_col in post_arc_w
+                    else pd.Series(dtype=str),
+                post_atom_w[group_col]
+                    if not post_atom_w.empty and group_col in post_atom_w
+                    else pd.Series(dtype=str),
+            ]).dropna().unique().tolist()
+            group_vals = sorted(all_vals)
+
+        for gv in group_vals:
+            for cohort, w_df, dash in [
+                ("Arcadia", post_arc_w, "solid"),
+                ("Atom",    post_atom_w, "dot"),
+            ]:
+                sub = w_df.copy() if w_df is not None else pd.DataFrame()
+                if sub.empty:
+                    continue
+                if group_col and gv is not None:
+                    sub = sub[sub[group_col] == gv]
+                if sub.empty:
+                    continue
+                sub["week_dt"] = pd.to_datetime(
+                    sub["week"], format="%m/%d/%Y", errors="coerce"
+                )
+                sub = sub.dropna(subset=["week_dt"]).sort_values("week_dt")
+
+                if view == "Raw KPI Value":
+                    y_vals = sub["value"].tolist()
+
+                elif view == "Post Δ (Arc/Atom−1)":
+                    if cohort != "Arcadia":
+                        continue
+                    atom_sub = post_atom_w.copy()
+                    if group_col and gv is not None:
+                        atom_sub = atom_sub[atom_sub[group_col] == gv]
+                    atom_sub["week_dt"] = pd.to_datetime(
+                        atom_sub["week"], format="%m/%d/%Y", errors="coerce"
+                    )
+                    atom_map = atom_sub.set_index("week_dt")["value"].to_dict()
+                    y_vals = [
+                        safe_delta_pct(v, atom_map.get(wk, float("nan")))
+                        for v, wk in zip(sub["value"], sub["week_dt"])
+                    ]
+
+                elif view == "Swing (Post Δ − Pre Δ)":
+                    if cohort != "Arcadia":
+                        continue
+                    atom_sub = post_atom_w.copy()
+                    if group_col and gv is not None:
+                        atom_sub = atom_sub[atom_sub[group_col] == gv]
+                    atom_sub["week_dt"] = pd.to_datetime(
+                        atom_sub["week"], format="%m/%d/%Y", errors="coerce"
+                    )
+                    atom_map = atom_sub.set_index("week_dt")["value"].to_dict()
+
+                    # Compute pre_d from pre_weekly_raw (same source as summary
+                    # table) rather than pre_tagged, so the swing baseline
+                    # matches what the cards and table show.
+                    pre_d_by_week = {}
+                    for wk_label in post_weeks:
+                        pw_arc_pre  = pre_weekly_raw[
+                            (pre_weekly_raw["post_week"] == wk_label) &
+                            (pre_weekly_raw["cohort"] == "Arcadia")
+                        ]
+                        pw_atom_pre = pre_weekly_raw[
+                            (pre_weekly_raw["post_week"] == wk_label) &
+                            (pre_weekly_raw["cohort"] == "Atom")
+                        ]
+                        if group_col and gv is not None:
+                            pw_arc_pre  = pw_arc_pre[pw_arc_pre[group_col]  == gv]
+                            pw_atom_pre = pw_atom_pre[pw_atom_pre[group_col] == gv]
+                        if pw_arc_pre.empty or pw_atom_pre.empty:
+                            pre_d_by_week[wk_label] = float("nan")
+                            continue
+                        arc_v  = compute_lift_kpis(pw_arc_pre).get(lift_metric_key,  float("nan"))
+                        atom_v = compute_lift_kpis(pw_atom_pre).get(lift_metric_key, float("nan"))
+                        pre_d_by_week[wk_label] = safe_delta_pct(arc_v, atom_v)
+
+                    # Convert week labels to datetime for lookup
+                    pre_d_by_week_dt = {
+                        pd.to_datetime(wk, format="%m/%d/%Y"): v
+                        for wk, v in pre_d_by_week.items()
+                    }
+
+                    y_vals = []
+                    for v, wk in zip(sub["value"], sub["week_dt"]):
+                        post_d = safe_delta_pct(v, atom_map.get(wk, float("nan")))
+                        pre_d  = pre_d_by_week_dt.get(wk, float("nan"))
+                        y_vals.append(
+                            post_d - pre_d
+                            if not (pd.isna(post_d) or pd.isna(pre_d))
+                            else float("nan")
+                        )
+                else:
+                    y_vals = sub["value"].tolist()
+
+                label = f"{gv} — {cohort}" if gv else cohort
+                traces.append((label, sub["week_dt"].tolist(), y_vals, dash))
+
+        return traces
+
+    traces = build_trend_series(
+        post_arc_weekly, post_atom_weekly, lift_view, lift_group_col
+    )
+
+    if traces:
+        fig_lift = go.Figure()
+        for label, x_vals, y_vals, dash in traces:
+            fig_lift.add_trace(go.Scatter(
+                x=x_vals, y=y_vals,
+                name=label,
+                mode="lines+markers",
+                line=dict(width=2, dash=dash),
+                marker=dict(size=5),
+            ))
+
+        is_pct    = lift_metric_fmt == "pct" or lift_view in (
+            "Post Δ (Arc/Atom−1)", "Swing (Post Δ − Pre Δ)"
+        )
+        is_dollar = lift_metric_fmt == "dollar" and lift_view == "Raw KPI Value"
+        all_x     = sorted(set(x for _, xs, _, _ in traces for x in xs))
+
+        apply_dark_theme(
+            fig_lift,
+            yaxis_tickformat=".1%" if is_pct else ("$,.1f" if is_dollar else ".2f"),
+            yaxis_tickprefix="$" if is_dollar else "",
+            xaxis=dict(
+                tickvals=all_x,
+                ticktext=[x.strftime("%b %d") for x in all_x],
+                gridcolor="#1e2330",
+                linecolor="#252b3a",
+                tickcolor="#252b3a",
+            ),
+            height=400,
+            margin=dict(l=50, r=20, t=10, b=40),
+            legend=dict(orientation="h", y=-0.25),
+        )
+
+        if lift_view in ("Post Δ (Arc/Atom−1)", "Swing (Post Δ − Pre Δ)"):
+            fig_lift.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color="#4d5669",
+                annotation_text="0",
+                annotation_font_color="#4d5669",
+            )
+
+        st.plotly_chart(fig_lift, use_container_width=True)
+    else:
+        st.info("No data available for the selected combination.")
