@@ -45,12 +45,40 @@ def get_data():
         ) AS rn
       FROM energy_prod.energy.v_agent_calls acf
       WHERE acf.call_datetime_est     >= (SELECT from_ts_est FROM params)
-        AND acf.call_direction         = 'INBOUND'
         AND acf.conversion_exclude_ind IS NULL
+      -- Removed: call_direction = 'INBOUND' filter to include outbound calls
     ),
 
     acf_dedup AS (
       SELECT * FROM acf_base WHERE rn = 1
+    ),
+
+    -- For each sub-30s call, find that agent's most recent prior call that is >30 seconds
+    short_call_anchor AS (
+      SELECT
+        short.call_id                                                          AS short_call_id,
+        MAX(long.call_datetime_est)                                            AS anchor_call_datetime_est
+      FROM acf_dedup short
+      JOIN acf_dedup long
+        ON  long.employeeid          = short.employeeid
+        AND long.talk_time_seconds   > 30
+        AND long.call_datetime_est  <= short.call_datetime_est
+      WHERE short.talk_time_seconds <= 30
+      GROUP BY short.call_id
+    ),
+
+    -- Resolve the actual call_id of that anchor call
+    short_call_anchor_id AS (
+      SELECT
+        sca.short_call_id,
+        ad.call_id AS anchor_call_id
+      FROM short_call_anchor sca
+      JOIN acf_dedup ad
+        ON  ad.call_datetime_est = sca.anchor_call_datetime_est
+        AND ad.talk_time_seconds > 30
+      JOIN acf_dedup short_call
+        ON  short_call.call_id    = sca.short_call_id
+        AND short_call.employeeid = ad.employeeid
     ),
 
     b_member AS (
@@ -118,10 +146,18 @@ def get_data():
         ELSE 'Site Session'
       END                                                               AS call_type,
 
-      CASE WHEN b.call_id IS NOT NULL THEN 'Arcadia' ELSE 'Atomizer' END AS membership,
+      -- Call direction indicator (change 1: outbound included, direction surfaced)
+      COALESCE(acf.call_direction, 'UNKNOWN')                          AS call_direction,
+
+      -- Membership: for sub-30s calls, inherit from anchor call if not directly in arcadia
+      CASE
+        WHEN acf.talk_time_seconds <= 30 THEN
+          CASE WHEN b_anchor.call_id IS NOT NULL THEN 'Arcadia' ELSE 'Atomizer' END
+        ELSE
+          CASE WHEN b.call_id IS NOT NULL THEN 'Arcadia' ELSE 'Atomizer' END
+      END                                                               AS membership,
 
       COALESCE(acf.agent_name, a.employee_name)                        AS agent_name,
-      COALESCE(acf.call_direction, 'UNKNOWN')                          AS call_direction,
       COALESCE(acf.center_location, 'UNKNOWN')                         AS center_location,
 
       CASE
@@ -152,8 +188,9 @@ def get_data():
 
       COALESCE(obc.orders, 0)                                          AS orders,
       COALESCE(obc.gcv_fo, 0)                                          AS gcv_fo,
-      COALESCE(acf.allconnect_transition_ind, 0) * 25                  AS cross_sell_rev,
-      COALESCE(obc.gcv_fo, 0) + COALESCE(acf.allconnect_transition_ind, 0) * 25 AS total_revenue,
+
+      -- Change 3: cross_sell_rev column removed; total_revenue is gcv_fo only
+      COALESCE(obc.gcv_fo, 0)                                          AS total_revenue,
 
       acf.talk_time_seconds / 60.0                                     AS talk_time_minutes,
       CASE WHEN COALESCE(obc.orders, 0) > 0 THEN acf.talk_time_seconds / 60.0 END AS talk_time_minutes_sold,
@@ -169,6 +206,12 @@ def get_data():
     FROM acf_dedup acf
     LEFT JOIN b_member b
       ON b.call_id = acf.call_id
+    -- Join to resolve the anchor call_id for sub-30s calls
+    LEFT JOIN short_call_anchor_id scai
+      ON scai.short_call_id = acf.call_id
+    -- Check if the anchor call is in the arcadia table
+    LEFT JOIN b_member b_anchor
+      ON b_anchor.call_id = scai.anchor_call_id
     LEFT JOIN orders_by_call obc
       ON obc.call_id = acf.call_id
     LEFT JOIN energy_prod.energy.v_agents a
@@ -203,4 +246,4 @@ if __name__ == "__main__":
         path = OUTPUT_DIR + filename
         group.to_csv(path, index=False)
         print(f"Saved {len(group):,} rows to {path}")
-    
+
