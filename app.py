@@ -395,6 +395,26 @@ def safe_rate(num, denom):
     return num / denom if denom > 0 else float("nan")
 
 
+def top_funnel_mask(d: pd.DataFrame) -> pd.Series:
+    """Inbound calls only for top-of-funnel denominators."""
+    if "call_direction" in d.columns:
+        return d["call_direction"].astype(str).str.upper().eq("INBOUND")
+    if "ibcalls" in d.columns:
+        return d["ibcalls"].eq(1)
+    return pd.Series(True, index=d.index)
+
+
+def order_revenue_mask(d: pd.DataFrame) -> pd.Series:
+    """Orders/revenue include inbound + manual outbound calls."""
+    if "call_direction" in d.columns:
+        return d["call_direction"].astype(str).str.upper().isin(["INBOUND", "MANUAL_OUTBOUND"])
+    return pd.Series(True, index=d.index)
+
+
+def top_funnel_call_count(d: pd.DataFrame) -> int:
+    return int(top_funnel_mask(d).sum())
+
+
 # Funnel / overview metric names where a *decrease* (P2 vs P1, or vs prior week) is better
 FUNNEL_METRIC_LOWER_IS_BETTER = frozenset({"Talk Time", "Sold Talk Time", "Unsold Talk Time"})
 # Lift tab KPI keys (same semantics for Arcadia vs Atom deltas)
@@ -451,22 +471,22 @@ def week_kpi(source, metric_fn):
 
 # ── Core metric computations ───────────────────────────────────────────────────
 def compute_kpis(d):
-    ib = d[d["ib_contact_calls"] >= 0] if "ib_contact_calls" in d.columns else d
-    n_calls       = len(d)
-    n_ib          = int(d["ib_contact_calls"].sum()) if "ib_contact_calls" in d.columns else n_calls
-    n_contact     = int(d["ib_contact_calls"].sum()) if "ib_contact_calls" in d.columns else 0
-    n_credit      = int(d["credit_calls_flag"].sum()) if "credit_calls_flag" in d.columns else 0
-    n_pass_credit = int(d["passed_credit_call_flag"].sum()) if "passed_credit_call_flag" in d.columns else 0
-    n_fail_credit = int(d["failed_credit_call_flag"].sum()) if "failed_credit_call_flag" in d.columns else 0
-    n_pass_sale   = int(d["passed_credit_sale_flag"].sum()) if "passed_credit_sale_flag" in d.columns else 0
-    n_fail_sale   = int(d["failed_credit_sale_flag"].sum()) if "failed_credit_sale_flag" in d.columns else 0
-    n_orders      = int(d["orders"].sum()) if "orders" in d.columns else 0
-    n_tpsales     = int(d["tpsales_flag"].sum()) if "tpsales_flag" in d.columns else 0
-    total_gcv     = d["gcv_fo"].sum() if "gcv_fo" in d.columns else 0.0
-    total_rev     = d["total_revenue"].sum() if "total_revenue" in d.columns else total_gcv
-    tt_avg        = d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan")
-    tt_sold       = d[d["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in d.columns and "orders" in d.columns) else float("nan")
-    tt_unsold     = d[d["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in d.columns and "orders" in d.columns) else float("nan")
+    inbound = d[top_funnel_mask(d)]
+    orders_rev_rows = d[order_revenue_mask(d)]
+    n_calls       = top_funnel_call_count(d)
+    n_contact     = int(inbound["ib_contact_calls"].sum()) if "ib_contact_calls" in inbound.columns else 0
+    n_credit      = int(inbound["credit_calls_flag"].sum()) if "credit_calls_flag" in inbound.columns else 0
+    n_pass_credit = int(inbound["passed_credit_call_flag"].sum()) if "passed_credit_call_flag" in inbound.columns else 0
+    n_fail_credit = int(inbound["failed_credit_call_flag"].sum()) if "failed_credit_call_flag" in inbound.columns else 0
+    n_pass_sale   = int(inbound["passed_credit_sale_flag"].sum()) if "passed_credit_sale_flag" in inbound.columns else 0
+    n_fail_sale   = int(inbound["failed_credit_sale_flag"].sum()) if "failed_credit_sale_flag" in inbound.columns else 0
+    n_orders      = int(orders_rev_rows["orders"].sum()) if "orders" in orders_rev_rows.columns else 0
+    n_tpsales     = int(orders_rev_rows["tpsales_flag"].sum()) if "tpsales_flag" in orders_rev_rows.columns else 0
+    total_gcv     = orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0.0
+    total_rev     = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else total_gcv
+    tt_avg        = inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
+    tt_sold       = inbound[inbound["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
+    tt_unsold     = inbound[inbound["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
 
     return {
         "n_calls":        n_calls,
@@ -494,7 +514,7 @@ if df["call_date_est"].notna().any():
     date_str = f"{mn} – {mx}"
 
 st.title("⚡ Arcadia Performance Dash")
-st.caption(f"{date_str}  ·  {len(df):,} calls in view")
+st.caption(f"{date_str}  ·  {top_funnel_call_count(df):,} inbound calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab_overview, tab_agent, tab_lift = st.tabs([
@@ -526,17 +546,17 @@ with tab_overview:
         this_v, _ = _wk_raw(fn)
         return this_v
 
-    lw_rev_call  = last_week_val(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, len(d)))
-    lw_net_conv  = last_week_val(lambda d: safe_rate(d["orders"].sum() if "orders" in d.columns else 0, len(d)))
-    lw_rev_order = last_week_val(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, d["orders"].sum() if "orders" in d.columns else 0))
-    lw_cic       = last_week_val(lambda d: safe_rate(d["credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, len(d)))
-    lw_tt        = last_week_val(lambda d: d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
+    lw_rev_call  = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
+    lw_net_conv  = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
+    lw_rev_order = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
+    lw_cic       = last_week_val(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
+    lw_tt        = last_week_val(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
-    cv1, pv1 = _wk_raw(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, len(d)))
-    cv2, pv2 = _wk_raw(lambda d: safe_rate(d["orders"].sum() if "orders" in d.columns else 0, len(d)))
-    cv3, pv3 = _wk_raw(lambda d: safe_rate(d["total_revenue"].sum() if "total_revenue" in d.columns else 0, d["orders"].sum() if "orders" in d.columns else 0))
-    cv4, pv4 = _wk_raw(lambda d: safe_rate(d["credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, len(d)))
-    cv5, pv5 = _wk_raw(lambda d: d["talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
+    cv1, pv1 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
+    cv2, pv2 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
+    cv3, pv3 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
+    cv4, pv4 = _wk_raw(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
+    cv5, pv5 = _wk_raw(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
     km1, km2, km3, km4, km5 = st.columns(5)
     km1.metric("Rev / Call",         f"${lw_rev_call:,.2f}"  if lw_rev_call  and not pd.isna(lw_rev_call)  else "—", delta=wk_pct_delta(cv1, pv1))
@@ -577,19 +597,21 @@ with tab_overview:
     ]
 
     def compute_funnel_row(grp, metric):
-        n          = len(grp)
-        n_contact  = grp["ib_contact_calls"].sum()  if "ib_contact_calls"       in grp.columns else 0
-        n_credit   = grp["credit_calls_flag"].sum() if "credit_calls_flag"       in grp.columns else 0
-        n_pass_cr  = grp["passed_credit_call_flag"].sum() if "passed_credit_call_flag" in grp.columns else 0
-        n_fail_cr  = grp["failed_credit_call_flag"].sum() if "failed_credit_call_flag" in grp.columns else 0
-        n_pass_sale= grp["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in grp.columns else 0
-        n_fail_sale= grp["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in grp.columns else 0
-        n_orders   = grp["orders"].sum()            if "orders"                  in grp.columns else 0
-        n_tpsales  = grp["tpsales_flag"].sum()      if "tpsales_flag"            in grp.columns else 0
-        rev        = grp["total_revenue"].sum()     if "total_revenue"           in grp.columns else grp["gcv_fo"].sum() if "gcv_fo" in grp.columns else 0
-        tt_all     = grp["talk_time_minutes"].mean()    if "talk_time_minutes"   in grp.columns else float("nan")
-        tt_sold    = grp[grp["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in grp.columns and "orders" in grp.columns) else float("nan")
-        tt_unsold  = grp[grp["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in grp.columns and "orders" in grp.columns) else float("nan")
+        inbound = grp[top_funnel_mask(grp)]
+        orders_rev_rows = grp[order_revenue_mask(grp)]
+        n          = top_funnel_call_count(grp)
+        n_contact  = inbound["ib_contact_calls"].sum()  if "ib_contact_calls"       in inbound.columns else 0
+        n_credit   = inbound["credit_calls_flag"].sum() if "credit_calls_flag"       in inbound.columns else 0
+        n_pass_cr  = inbound["passed_credit_call_flag"].sum() if "passed_credit_call_flag" in inbound.columns else 0
+        n_fail_cr  = inbound["failed_credit_call_flag"].sum() if "failed_credit_call_flag" in inbound.columns else 0
+        n_pass_sale= inbound["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in inbound.columns else 0
+        n_fail_sale= inbound["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in inbound.columns else 0
+        n_orders   = orders_rev_rows["orders"].sum()            if "orders"                  in orders_rev_rows.columns else 0
+        n_tpsales  = orders_rev_rows["tpsales_flag"].sum()      if "tpsales_flag"            in orders_rev_rows.columns else 0
+        rev        = orders_rev_rows["total_revenue"].sum()     if "total_revenue"           in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
+        tt_all     = inbound["talk_time_minutes"].mean()    if "talk_time_minutes"   in inbound.columns else float("nan")
+        tt_sold    = inbound[inbound["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
+        tt_unsold  = inbound[inbound["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
 
         val_map = {
             "Calls":           n,
@@ -810,24 +832,26 @@ with tab_overview:
         num_col_ov, denom_col_ov, fmt_ov = METRIC_MAP_OV[ov_metric_choice]
 
         def agg_metric_ov(grp):
+            inbound = grp[top_funnel_mask(grp)]
+            orders_rev_rows = grp[order_revenue_mask(grp)]
             if ov_metric_choice == "Calls":
-                return len(grp)
+                return top_funnel_call_count(grp)
             elif ov_metric_choice == "Talk Time":
-                return grp["talk_time_minutes"].mean() if "talk_time_minutes" in grp.columns else float("nan")
+                return inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
             elif ov_metric_choice == "Total Revenue":
-                return grp["total_revenue"].sum() if "total_revenue" in grp.columns else grp["gcv_fo"].sum() if "gcv_fo" in grp.columns else 0
+                return orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
             elif fmt_ov == "dollar" and denom_col_ov:
-                num = grp["total_revenue"].sum() if "total_revenue" in grp.columns else 0
-                denom = len(grp) if denom_col_ov == "n_calls" else (grp["orders"].sum() if "orders" in grp.columns else 0)
+                num = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else 0
+                denom = top_funnel_call_count(grp) if denom_col_ov == "n_calls" else (orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0)
                 return safe_rate(num, denom)
             elif fmt_ov == "pct":
-                if num_col_ov not in grp.columns:
+                if num_col_ov not in inbound.columns:
                     return float("nan")
-                num = grp[num_col_ov].sum()
+                num = inbound[num_col_ov].sum()
                 if denom_col_ov == "n_calls":
-                    denom = len(grp)
-                elif denom_col_ov and denom_col_ov in grp.columns:
-                    denom = grp[denom_col_ov].sum()
+                    denom = top_funnel_call_count(grp)
+                elif denom_col_ov and denom_col_ov in inbound.columns:
+                    denom = inbound[denom_col_ov].sum()
                 else:
                     return float("nan")
                 return safe_rate(num, denom)
@@ -990,12 +1014,14 @@ with tab_agent:
             ag = ag[ag["agent_name"].astype(str).str.contains(agent_search, case=False, na=False)]
 
         def agent_agg(g):
-            n = len(g)
-            n_orders  = g["orders"].sum() if "orders" in g.columns else 0
-            n_tpsales = g["tpsales_flag"].sum() if "tpsales_flag" in g.columns else 0
-            rev       = g["total_revenue"].sum() if "total_revenue" in g.columns else g["gcv_fo"].sum() if "gcv_fo" in g.columns else 0
-            tt_all    = g["talk_time_minutes"].mean() if "talk_time_minutes" in g.columns else float("nan")
-            tt_sold   = g[g["orders"] > 0]["talk_time_minutes"].mean() if "talk_time_minutes" in g.columns else float("nan")
+            inbound = g[top_funnel_mask(g)]
+            orders_rev_rows = g[order_revenue_mask(g)]
+            n = top_funnel_call_count(g)
+            n_orders  = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
+            n_tpsales = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
+            rev       = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
+            tt_all    = inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
+            tt_sold   = inbound[inbound["orders"] > 0]["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
             cohort    = g["membership"].mode()[0] if "membership" in g.columns and len(g) > 0 else "—"
             center    = g["center_location"].mode()[0] if "center_location" in g.columns and len(g) > 0 else "—"
             tenure    = g["tenure_bucket"].mode()[0] if "tenure_bucket" in g.columns and len(g) > 0 else "—"
@@ -1294,13 +1320,13 @@ with tab_lift:
             return float("nan")
 
     def compute_lift_kpis(d):
-        ib     = d["ibcalls"] == 1
-        ib_mob = ib | (d["call_direction"] == "MANUAL_OUTBOUND")
-        ib_d   = d[ib]
+        ib_mask = top_funnel_mask(d)
+        ib_d = d[ib_mask]
+        orders_rev_rows = d[order_revenue_mask(d)]
 
-        net_call      = ib.sum()
-        orders        = d.loc[ib_mob, "order_orders"].sum()
-        revenue       = d.loc[ib_mob, "gcv_revenue"].sum()
+        net_call      = int(ib_mask.sum())
+        orders        = orders_rev_rows["order_orders"].sum() if "order_orders" in orders_rev_rows.columns else 0
+        revenue       = orders_rev_rows["gcv_revenue"].sum() if "gcv_revenue" in orders_rev_rows.columns else 0
         tt_avg        = safe_rate(ib_d["talk_time_minutes"].sum(), net_call)
         contact_calls = ib_d["ib_contact_calls"].sum()       if "ib_contact_calls"       in d.columns else 0
         credit_calls  = ib_d["credit_calls_ind"].sum()       if "credit_calls_ind"        in d.columns else 0
@@ -1371,8 +1397,8 @@ with tab_lift:
         pre_atom_k  = compute_lift_kpis(pre_wk_atom)
 
         week_weight = (
-            int((post_wk_arc["ibcalls"]  == 1).sum()) +
-            int((post_wk_atom["ibcalls"] == 1).sum())
+            top_funnel_call_count(post_wk_arc) +
+            top_funnel_call_count(post_wk_atom)
         )
 
         rec = {"week": wk, "weight": week_weight}
