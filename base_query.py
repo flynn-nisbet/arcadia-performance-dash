@@ -91,7 +91,7 @@ def get_data():
       SELECT
         o.call_id,
         COUNT(DISTINCT o.order_id)                                                       AS orders,
-        SUM(COALESCE(o.undiscounted_gcv, 0) * COALESCE(o.predicted_activation_rate, 0)) AS gcv_fo,
+        SUM(COALESCE(o.gcv_v2, 0))                                                      AS gcv_fo,
         MAX(CASE WHEN o.product_name = '12 Month - Prepaid' THEN 1 ELSE 0 END)          AS has_prepaid_12m
       FROM energy_prod.energy.v_orders o
       INNER JOIN acf_dedup acf ON acf.call_id = o.call_id
