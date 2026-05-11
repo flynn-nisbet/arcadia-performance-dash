@@ -8,6 +8,35 @@ import streamlit as st
 
 # Persisted choice: first option is default (Dark) on first visit.
 THEME_RADIO_KEY = "arcadia_app_theme"
+# Survives full-page reload when syncing Streamlit host theme (session_state resets on reload).
+THEME_QUERY_KEY = "arcadia_theme"
+_THEME_URL_SIG_KEY = "_arcadia_theme_url_sig"
+
+
+def restore_theme_from_query_params() -> None:
+    """After host-theme sync, the browser opens ``?arcadia_theme=light|dark`` so we can restore
+    the sidebar radio — a hard reload clears widget state back to default Dark.
+
+    We only apply when the query value **changes** so a lingering ``?arcadia_theme=light`` does not
+    override the user after they switch back to Dark."""
+    qp = st.query_params
+    if THEME_QUERY_KEY not in qp:
+        st.session_state.pop(_THEME_URL_SIG_KEY, None)
+        return
+    raw = qp.get(THEME_QUERY_KEY)
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    s = str(raw).strip().lower()
+    if s not in ("light", "l", "dark", "d"):
+        return
+    sig = f"{THEME_QUERY_KEY}={s}"
+    if st.session_state.get(_THEME_URL_SIG_KEY) == sig:
+        return
+    if s in ("light", "l"):
+        st.session_state[THEME_RADIO_KEY] = "Light"
+    else:
+        st.session_state[THEME_RADIO_KEY] = "Dark"
+    st.session_state[_THEME_URL_SIG_KEY] = sig
 
 
 def is_light_theme() -> bool:
@@ -666,8 +695,17 @@ def _sync_streamlit_browser_theme(light: bool) -> None:
     }}
     if (cur === desired) return;
     storage().setItem(key, JSON.stringify(desired));
-    try {{ window.parent.location.reload(); }}
-    catch (e) {{ window.top.location.reload(); }}
+    var href = (function () {{
+      try {{ return window.parent.location.href; }}
+      catch (e) {{
+        try {{ return window.top.location.href; }}
+        catch (e2) {{ return window.location.href; }}
+      }}
+    }})();
+    var u = new URL(href);
+    u.searchParams.set({json.dumps(THEME_QUERY_KEY)}, desired === "Light" ? "light" : "dark");
+    try {{ window.parent.location.href = u.toString(); }}
+    catch (e) {{ window.top.location.href = u.toString(); }}
   }} catch (e) {{}}
 }})();
 </script>""",
