@@ -255,8 +255,13 @@ def parse_display_pct(val):
     except ValueError:
         return None
 
-def wtd_vs_four_week_avg(source, metric_fn):
-    """Partial Mon–Sun week through ``report_through_date()`` vs mean of four prior full Mon–Sun weeks."""
+def wtd_vs_four_week_pooled(source, metric_fn):
+    """Partial Mon–Sun week through ``report_through_date()`` vs P4WA on one pooled window.
+
+    P4WA is computed on **all calls in the four prior full Mon–Sun weeks** (same calendar span as
+    four separate weeks), then the metric function runs once on that combined slice — e.g. Rev/Call
+    is total revenue over total calls in those 28 days, not the mean of each week's Rev/Call.
+    """
     if "call_date_est" not in source.columns:
         return None, None
     tmp = source.dropna(subset=["call_date_est"]).copy()
@@ -270,13 +275,11 @@ def wtd_vs_four_week_avg(source, metric_fn):
         return tmp.loc[m]
 
     cur = metric_fn(_slice(week_start, as_of))
-    prior_week_vals = []
-    for i in range(1, 5):
-        mon = week_start - timedelta(days=7 * i)
-        sun = mon + timedelta(days=6)
-        prior_week_vals.append(metric_fn(_slice(mon, sun)))
-    baseline = float(np.nanmean(prior_week_vals)) if prior_week_vals else float("nan")
-    if prior_week_vals and all(pd.isna(v) for v in prior_week_vals):
+    # Four full Mon–Sun weeks immediately before the current week: Mon (week_start − 28) … Sun (week_start − 1)
+    pool_start = week_start - timedelta(days=28)
+    pool_end = week_start - timedelta(days=1)
+    baseline = metric_fn(_slice(pool_start, pool_end))
+    if baseline is not None and isinstance(baseline, float) and pd.isna(baseline):
         baseline = float("nan")
     return cur, baseline
 
@@ -342,24 +345,25 @@ with tab_overview:
     # One filtered frame without sidebar date range (WTD KPIs + custom period comparison share it).
     _df_no_dr = apply_filters(df_raw.copy(), use_date_range=False)
 
-    # ── Top KPI row — partial Mon–Sun week (through yesterday) vs 4-wk avg, ignores date filter ─
+    # ── Top KPI row — partial Mon–Sun week (through yesterday) vs pooled P4WA, ignores date filter ─
     st.subheader("Performance So Far This Week")
     _wtd_asof = report_through_date()
     _wtd_ws = monday_of_week_containing(_wtd_asof)
     st.caption(
-        "Mon–Sun calendar weeks · partial current week (through yesterday) vs mean of four prior full Mon–Sun weeks · "
+        "Mon–Sun calendar weeks · partial current week (through yesterday) vs **P4WA** (same KPIs computed on "
+        "all calls in the **four prior full Mon–Sun weeks** together — pooled, not a weekly average) · "
         "ignores date filter · Center and other sidebar filters apply. "
         f"Comparison dates: {_wtd_ws:%b %d}–{_wtd_asof:%b %d} vs P4WA."
     )
 
     def _wk_raw(fn):
         """Uses df_raw with sidebar filters except date."""
-        return wtd_vs_four_week_avg(_df_no_dr, fn)
+        return wtd_vs_four_week_pooled(_df_no_dr, fn)
 
     def wk_pct_delta_vs_avg(cur, baseline):
         if cur is None or baseline is None or pd.isna(cur) or pd.isna(baseline) or baseline == 0:
             return None
-        return f"{(cur / baseline - 1) * 100:+.1f}% vs 4-wk avg"
+        return f"{(cur / baseline - 1) * 100:+.1f}% vs P4WA (pooled)"
 
     def wtd_display_val(fn):
         cur, _ = _wk_raw(fn)
