@@ -25,313 +25,15 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Custom CSS (dark-first; follows Streamlit light/dark via --st-* fallbacks) ─
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&display=swap');
-
-:root {
-    --bg-base:       #0d0f14;
-    --bg-card:       #13161d;
-    --bg-card-alt:   #181c25;
-    --bg-hover:      #1e2330;
-    --border:        #252b3a;
-    --border-bright: #2e3649;
-    --accent:        #3d8ef8;
-    --accent-dim:    #2563c4;
-    --accent-glow:   rgba(61, 142, 248, 0.12);
-    --teal:          #22d3c8;
-    --amber:         #f5a623;
-    --rose:          #f43f5e;
-    --green:         #22c55e;
-    --text-primary:  #e8ecf4;
-    --text-secondary:#8b95aa;
-    --text-muted:    #4d5669;
-    --radius:        8px;
-    --radius-lg:     12px;
-}
-
-html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {
-    font-family: 'DM Sans', sans-serif !important;
-    color: var(--st-text-color, var(--text-primary)) !important;
-}
-
-.stApp {
-    background-color: var(--st-background-color, var(--bg-base)) !important;
-    color: var(--st-text-color, var(--text-primary)) !important;
-    background-image:
-        radial-gradient(ellipse 80% 40% at 50% -10%, rgba(61,142,248,0.06) 0%, transparent 58%),
-        radial-gradient(ellipse 40% 30% at 90% 80%, rgba(34,211,200,0.03) 0%, transparent 50%);
-}
-
-.main .block-container {
-    padding: 2rem 2.5rem 4rem !important;
-    max-width: 1600px !important;
-}
-
-[data-testid="stSidebar"] {
-    background-color: var(--st-secondary-background-color, var(--bg-card)) !important;
-    border-right: 1px solid var(--st-border-color, var(--border)) !important;
-}
-[data-testid="stSidebar"] .stTitle > * {
-    font-family: 'Syne', sans-serif !important;
-    font-size: 1.1rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-    color: var(--accent) !important;
-}
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] .stSelectbox label,
-[data-testid="stSidebar"] .stMultiSelect label,
-[data-testid="stSidebar"] .stDateInput label,
-[data-testid="stSidebar"] .stToggle label {
-    font-size: 0.7rem !important;
-    font-weight: 500 !important;
-    letter-spacing: 0.1em !important;
-    text-transform: uppercase !important;
-    color: var(--text-secondary) !important;
-}
-
-h1, h2, h3, h4 {
-    font-family: 'Syne', sans-serif !important;
-    color: var(--st-text-color, var(--text-primary)) !important;
-}
-h1 { font-size: 1.8rem !important; font-weight: 800 !important; letter-spacing: -0.01em !important; }
-h2 { font-size: 1.25rem !important; font-weight: 700 !important; letter-spacing: 0.01em !important; }
-h3 { font-size: 1rem !important; font-weight: 600 !important; }
-
-[data-testid="stHeading"] h1 {
-    color: var(--st-text-color, var(--text-primary)) !important;
-    font-size: 2rem !important;
-    font-weight: 800 !important;
-    letter-spacing: -0.02em !important;
-    padding-bottom: 0.1em;
-}
-
-.stCaptionContainer, [data-testid="stCaptionContainer"], small, caption {
-    color: var(--st-text-color-secondary, var(--text-secondary)) !important;
-    font-size: 0.78rem !important;
-    line-height: 1.5 !important;
-}
-
-[data-testid="stMetric"] {
-    background: var(--st-secondary-background-color, var(--bg-card)) !important;
-    border: 1px solid var(--st-border-color, var(--border)) !important;
-    border-radius: var(--radius-lg) !important;
-    padding: 1rem 1.25rem !important;
-    transition: border-color 0.2s, box-shadow 0.2s !important;
-    position: relative;
-    overflow: hidden;
-}
-[data-testid="stMetric"]::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, var(--accent), var(--teal));
-    opacity: 0;
-    transition: opacity 0.2s;
-}
-[data-testid="stMetric"]:hover { border-color: var(--border-bright) !important; box-shadow: 0 0 0 1px var(--border-bright), 0 4px 20px rgba(0,0,0,0.4) !important; }
-[data-testid="stMetric"]:hover::before { opacity: 1; }
-[data-testid="stMetricLabel"] { font-size: 0.68rem !important; font-weight: 500 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; font-family: 'DM Sans', sans-serif !important; }
-[data-testid="stMetricValue"] { font-family: 'DM Mono', monospace !important; font-size: 1.5rem !important; font-weight: 500 !important; color: var(--st-text-color, var(--text-primary)) !important; line-height: 1.2 !important; }
-[data-testid="stMetricDelta"] { font-family: 'DM Mono', monospace !important; font-size: 0.75rem !important; }
-[data-testid="stMetricDelta"] svg { display: none !important; }
-
-[data-testid="stTabs"] [role="tablist"] { border-bottom: 1px solid var(--st-border-color, var(--border)) !important; gap: 0 !important; background: transparent !important; }
-[data-testid="stTabs"] [role="tab"] { font-family: 'Syne', sans-serif !important; font-size: 0.78rem !important; font-weight: 600 !important; letter-spacing: 0.07em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-muted)) !important; padding: 0.6rem 1.25rem !important; border: none !important; border-bottom: 2px solid transparent !important; background: transparent !important; transition: color 0.15s, border-color 0.15s !important; }
-[data-testid="stTabs"] [role="tab"]:hover { color: var(--st-text-color, var(--text-secondary)) !important; border-bottom-color: var(--st-border-color, var(--border-bright)) !important; }
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: var(--st-primary-color, var(--accent)) !important; border-bottom-color: var(--st-primary-color, var(--accent)) !important; background: transparent !important; }
-
-hr { border: none !important; border-top: 1px solid var(--st-border-color, var(--border)) !important; margin: 2rem 0 !important; }
-
-.stSelectbox > div > div,
-.stMultiSelect > div > div,
-.stTextInput > div > div > input,
-.stDateInput > div > div > input {
-    background-color: var(--st-secondary-background-color, var(--bg-card-alt)) !important;
-    border: 1px solid var(--st-border-color, var(--border-bright)) !important;
-    border-radius: var(--radius) !important;
-    color: var(--st-text-color, var(--text-primary)) !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.85rem !important;
-    transition: border-color 0.15s !important;
-}
-.stSelectbox > div > div:focus-within,
-.stMultiSelect > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent-glow) !important; outline: none !important; }
-
-[data-baseweb="menu"] { background-color: var(--st-secondary-background-color, var(--bg-card-alt)) !important; border: 1px solid var(--st-border-color, var(--border-bright)) !important; border-radius: var(--radius) !important; }
-[data-baseweb="menu"] li { font-family: 'DM Sans', sans-serif !important; font-size: 0.85rem !important; color: var(--st-text-color, var(--text-primary)) !important; }
-[data-baseweb="menu"] li:hover { background-color: var(--st-secondary-background-color, var(--bg-hover)) !important; }
-[data-baseweb="tag"] { background-color: var(--accent-dim) !important; border: none !important; border-radius: 4px !important; font-size: 0.75rem !important; }
-
-.stRadio > div { gap: 0.5rem !important; background: transparent !important; border: none !important; padding: 0 !important; display: inline-flex !important; }
-.stRadio label { font-size: 0.75rem !important; font-weight: 500 !important; letter-spacing: 0.05em !important; text-transform: uppercase !important; padding: 0.3rem 0.85rem !important; border-radius: 6px !important; cursor: pointer !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; background: transparent !important; transition: color 0.15s !important; }
-
-[data-testid="stDataFrame"], .stDataFrame { border: 1px solid var(--st-border-color, var(--border)) !important; border-radius: var(--radius-lg) !important; overflow: hidden !important; }
-[data-testid="stDataFrame"] thead th { background: var(--st-secondary-background-color, var(--bg-card-alt)) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.68rem !important; font-weight: 600 !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--st-text-color-secondary, var(--text-secondary)) !important; border-bottom: 1px solid var(--st-border-color, var(--border-bright)) !important; padding: 0.6rem 0.8rem !important; }
-[data-testid="stDataFrame"] thead th:not(:first-child),
-[data-testid="stDataFrame"] tbody td:not(:first-child) { text-align: right !important; }
-[data-testid="stDataFrame"] thead th:first-child,
-[data-testid="stDataFrame"] tbody td:first-child { text-align: left !important; }
-[data-testid="stDataFrame"] tbody td { font-family: 'DM Mono', monospace !important; font-size: 0.82rem !important; color: var(--st-text-color, var(--text-primary)) !important; border-bottom: 1px solid var(--st-border-color, var(--border)) !important; padding: 0.5rem 0.8rem !important; background: var(--st-secondary-background-color, var(--bg-card)) !important; }
-[data-testid="stDataFrame"] tbody tr:hover td { background: var(--st-secondary-background-color, var(--bg-hover)) !important; }
-
-.stButton > button { background: var(--st-primary-color, var(--accent)) !important; color: white !important; border: none !important; border-radius: var(--radius) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.8rem !important; font-weight: 600 !important; letter-spacing: 0.05em !important; padding: 0.5rem 1.25rem !important; transition: all 0.15s !important; }
-.stButton > button:hover { background: var(--accent-dim) !important; box-shadow: 0 4px 12px rgba(61,142,248,0.3) !important; transform: translateY(-1px) !important; }
-
-[data-testid="stHeading"] h2, .stMarkdown h2 { color: var(--st-text-color, var(--text-primary)) !important; font-size: 1.1rem !important; font-weight: 700 !important; letter-spacing: 0.02em !important; padding-top: 0.25rem !important; padding-bottom: 0.5rem !important; border-bottom: 1px solid var(--st-border-color, var(--border)) !important; margin-bottom: 1rem !important; }
-
-[data-testid="stInfo"] { background: rgba(61,142,248,0.08) !important; border: 1px solid rgba(61,142,248,0.25) !important; border-radius: var(--radius) !important; color: var(--accent) !important; font-size: 0.85rem !important; }
-[data-testid="stWarning"] { background: rgba(245,166,35,0.08) !important; border: 1px solid rgba(245,166,35,0.25) !important; border-radius: var(--radius) !important; color: var(--amber) !important; }
-
-[data-testid="stCaptionContainer"] p { color: var(--st-text-color-secondary, var(--text-muted)) !important; font-size: 0.78rem !important; font-family: 'DM Mono', monospace !important; letter-spacing: 0.05em !important; }
-.stMarkdown strong { color: var(--st-text-color, var(--text-primary)) !important; font-weight: 600 !important; }
-
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--st-background-color, var(--bg-base)); }
-::-webkit-scrollbar-thumb { background: var(--st-border-color, var(--border-bright)); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--st-text-color-secondary, var(--text-muted)); }
-</style>
-""", unsafe_allow_html=True)
-
-# ── Plotly themes (match app dark / Streamlit light) ───────────────────────────
-PLOT_COLORWAY = ["#3d8ef8", "#22d3c8", "#f5a623", "#f43f5e", "#a78bfa", "#22c55e"]
-
-# Solid paper/plot colors so PNG exports (Plotly camera) match on-screen dark vs light mode.
-PLOT_LAYOUT_DARK = dict(
-    paper_bgcolor="#0d0f14",
-    plot_bgcolor="#13161d",
-    font=dict(family="DM Sans, sans-serif", color="#e8ecf4", size=12),
-    xaxis=dict(
-        gridcolor="#252b3a",
-        linecolor="#2e3649",
-        tickcolor="#2e3649",
-        zerolinecolor="#2e3649",
-        tickfont=dict(color="#cbd5e1"),
-        title=dict(font=dict(color="#e8ecf4")),
-    ),
-    yaxis=dict(
-        gridcolor="#252b3a",
-        linecolor="#2e3649",
-        tickcolor="#2e3649",
-        zerolinecolor="#2e3649",
-        tickfont=dict(color="#cbd5e1"),
-        title=dict(font=dict(color="#e8ecf4")),
-    ),
-    legend=dict(
-        bgcolor="#13161d",
-        bordercolor="#252b3a",
-        borderwidth=1,
-        font=dict(size=11, color="#e8ecf4"),
-    ),
-    colorway=PLOT_COLORWAY,
+import theme
+from charts import (
+    PLOT_COLORWAY,
+    apply_chart_theme,
+    chart_theme_is_light,
+    lift_chart_title,
+    overview_chart_title,
+    plotly_axis_lines,
 )
-
-PLOT_LAYOUT_LIGHT = dict(
-    paper_bgcolor="#ffffff",
-    plot_bgcolor="#f8fafc",
-    font=dict(family="DM Sans, sans-serif", color="#0f172a", size=12),
-    xaxis=dict(
-        gridcolor="#e2e8f0",
-        linecolor="#94a3b8",
-        tickcolor="#94a3b8",
-        zerolinecolor="#cbd5e1",
-        tickfont=dict(color="#334155"),
-        title=dict(font=dict(color="#0f172a")),
-    ),
-    yaxis=dict(
-        gridcolor="#e2e8f0",
-        linecolor="#94a3b8",
-        tickcolor="#94a3b8",
-        zerolinecolor="#cbd5e1",
-        tickfont=dict(color="#334155"),
-        title=dict(font=dict(color="#0f172a")),
-    ),
-    legend=dict(
-        bgcolor="#ffffff",
-        bordercolor="#e2e8f0",
-        borderwidth=1,
-        font=dict(size=11, color="#0f172a"),
-    ),
-    colorway=PLOT_COLORWAY,
-)
-
-
-def chart_theme_is_light() -> bool:
-    try:
-        return str(st.context.theme.get("type", "") or "").lower() == "light"
-    except Exception:
-        return False
-
-
-if chart_theme_is_light():
-    st.markdown(
-        """
-<style>
-/* Light Streamlit theme: use a white app shell (base CSS used dark fallbacks). */
-.stApp {
-    background-color: #ffffff !important;
-    background-image: none !important;
-}
-[data-testid="stHeader"] {
-    background-color: rgba(255, 255, 255, 0.97) !important;
-    border-bottom: 1px solid #e2e8f0 !important;
-}
-[data-testid="stToolbar"] {
-    background-color: #ffffff !important;
-}
-[data-testid="stSidebar"] {
-    background-color: #f8fafc !important;
-    border-right-color: #e2e8f0 !important;
-}
-[data-testid="stSidebar"] .stTitle > * {
-    color: #2563eb !important;
-}
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] .stSelectbox label,
-[data-testid="stSidebar"] .stMultiSelect label,
-[data-testid="stSidebar"] .stDateInput label,
-[data-testid="stSidebar"] .stToggle label {
-    color: #64748b !important;
-}
-</style>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-def plotly_axis_lines():
-    """Axis line/tick styling merged into ``xaxis`` / ``yaxis`` updates (keeps contrast on PNG export)."""
-    if chart_theme_is_light():
-        return dict(
-            gridcolor="#e2e8f0",
-            linecolor="#94a3b8",
-            tickcolor="#94a3b8",
-            zerolinecolor="#cbd5e1",
-            tickfont=dict(color="#334155"),
-            title=dict(font=dict(color="#0f172a")),
-        )
-    return dict(
-        gridcolor="#252b3a",
-        linecolor="#2e3649",
-        tickcolor="#2e3649",
-        zerolinecolor="#2e3649",
-        tickfont=dict(color="#cbd5e1"),
-        title=dict(font=dict(color="#e8ecf4")),
-    )
-
-
-def apply_chart_theme(fig, **extra):
-    base = PLOT_LAYOUT_LIGHT if chart_theme_is_light() else PLOT_LAYOUT_DARK
-    fig.update_layout(**{**base, **extra})
-    return fig
-
-
-def apply_dark_theme(fig, **extra):
-    return apply_chart_theme(fig, **extra)
 
 
 def dataframe_display_height(n_rows: int, min_rows: int = 4, row_px: int = 36, header_px: int = 52, cap: int = 2200) -> int:
@@ -401,18 +103,6 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
             height=52,
         )
 
-
-def overview_chart_title(metric: str, group_choice: str) -> str:
-    if group_choice == "None (Overall)":
-        return metric
-    return f"{metric} × {group_choice}"
-
-
-def lift_chart_title(metric: str, group_choice: str, view: str) -> str:
-    if group_choice == "None (Overall)":
-        return f"{metric} — {view}"
-    return f"{metric} × {group_choice} — {view}"
-
 # ── Load data ──────────────────────────────────────────────────────────────────
 @st.cache_data(ttl="24h")
 def load_data():
@@ -438,6 +128,8 @@ except Exception as e:
 
 # ── Sidebar Filters ────────────────────────────────────────────────────────────
 with st.sidebar:
+    theme.render_app_theme_toggle()
+    st.divider()
     st.title("Filters")
 
     min_d = df_raw["call_date_est"].min().date()
@@ -466,6 +158,8 @@ with st.sidebar:
     sel_mov      = st.multiselect("Mover / Switcher", options=mov_opts,      default=[], key="f_mov")
     sel_tenure   = st.multiselect("Tenure Bucket",    options=tenure_opts,   default=[], key="f_tenure")
     sel_calltype = st.multiselect("Site/SERP",        options=calltype_opts, default=[], key="f_calltype")
+
+theme.inject_app_styles()
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
@@ -635,18 +329,12 @@ with tab_overview:
 
     # ── Top KPI row — partial Mon–Sun week (through yesterday) vs 4-wk avg, ignores date filter ─
     st.subheader("Performance So Far This Week")
-    st.caption(
-        "Mon–Sun calendar weeks · compares the partial current week (through yesterday) to the average "
-        "of the four prior full weeks · ignores date filter · Center and other sidebar filters apply"
-    )
     _wtd_asof = report_through_date()
     _wtd_ws = monday_of_week_containing(_wtd_asof)
-    _wtd_first_prior_mon = _wtd_ws - timedelta(days=28)
-    _wtd_last_prior_sun = _wtd_ws - timedelta(days=1)
-    st.markdown(
-        f"**Week-to-date:** {_wtd_ws:%b %d, %Y} – {_wtd_asof:%b %d, %Y} · "
-        f"**vs 4-week average** (mean of the same KPI on each of four prior Mon–Sun weeks): "
-        f"calendar span **{_wtd_first_prior_mon:%b %d, %Y}** – **{_wtd_last_prior_sun:%b %d, %Y}**."
+    st.caption(
+        "Mon–Sun calendar weeks · partial current week (through yesterday) vs mean of four prior full Mon–Sun weeks · "
+        "ignores date filter · Center and other sidebar filters apply. "
+        f"Comparison dates: {_wtd_ws:%b %d}–{_wtd_asof:%b %d} vs P4WA."
     )
 
     def _wk_raw(fn):
