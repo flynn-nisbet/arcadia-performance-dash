@@ -28,6 +28,7 @@ st.set_page_config(
 import theme
 
 theme.restore_theme_from_query_params()
+theme.restore_cmp_dates_from_query_params()
 
 from charts import (
     PLOT_COLORWAY,
@@ -338,6 +339,9 @@ tab_overview, tab_agent, tab_lift = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_overview:
 
+    # One filtered frame without sidebar date range (WTD KPIs + custom period comparison share it).
+    _df_no_dr = apply_filters(df_raw.copy(), use_date_range=False)
+
     # ── Top KPI row — partial Mon–Sun week (through yesterday) vs 4-wk avg, ignores date filter ─
     st.subheader("Performance So Far This Week")
     _wtd_asof = report_through_date()
@@ -350,7 +354,7 @@ with tab_overview:
 
     def _wk_raw(fn):
         """Uses df_raw with sidebar filters except date."""
-        return wtd_vs_four_week_avg(apply_filters(df_raw.copy(), use_date_range=False), fn)
+        return wtd_vs_four_week_avg(_df_no_dr, fn)
 
     def wk_pct_delta_vs_avg(cur, baseline):
         if cur is None or baseline is None or pd.isna(cur) or pd.isna(baseline) or baseline == 0:
@@ -487,7 +491,7 @@ with tab_overview:
         "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
         "Each period is one aggregate over its date window (same metrics as the funnel table)."
     )
-    df_cmp = apply_filters(df_raw.copy(), use_date_range=False)
+    df_cmp = _df_no_dr
     if "call_date_est" in df_cmp.columns and len(df_cmp) > 0:
         _cmp_min = df_cmp["call_date_est"].min().date()
         _cmp_max = df_cmp["call_date_est"].max().date()
@@ -503,23 +507,61 @@ with tab_overview:
             _d1_start = _cmp_min
             _d1_end = min(_cmp_cap, _d1_start + _w)
 
+        _OCK1, _OCK2 = "ov_cmp_period1", "ov_cmp_period2"
+
+        def _cmp_sort_pair(p):
+            if p is None or len(p) != 2:
+                return None
+            a, b = p[0], p[1]
+            return (a, b) if a <= b else (b, a)
+
+        def _clamp_cmp_pair(lo, hi, pair, fallback):
+            fb = _cmp_sort_pair(fallback)
+            if fb is None:
+                fb = (lo, min(hi, lo + timedelta(days=6)))
+            sp = _cmp_sort_pair(pair)
+            if sp is None:
+                return fb
+            a, b = sp
+            a = max(lo, min(hi, a))
+            b = max(lo, min(hi, b))
+            if a > b:
+                return fb
+            return (a, b)
+
+        if _OCK1 not in st.session_state:
+            st.session_state[_OCK1] = (_d1_start, _d1_end)
+        if _OCK2 not in st.session_state:
+            st.session_state[_OCK2] = (_d2_start, _d2_end)
+        # Only clamp complete ranges — range pickers briefly hold 0–1 dates; clamping would reset to defaults.
+        _rv1 = st.session_state.get(_OCK1)
+        if isinstance(_rv1, (tuple, list)) and len(_rv1) == 2:
+            st.session_state[_OCK1] = _clamp_cmp_pair(
+                _cmp_min, _cmp_cap, tuple(_rv1), (_d1_start, _d1_end)
+            )
+        _rv2 = st.session_state.get(_OCK2)
+        if isinstance(_rv2, (tuple, list)) and len(_rv2) == 2:
+            st.session_state[_OCK2] = _clamp_cmp_pair(
+                _cmp_min, _cmp_cap, tuple(_rv2), (_d2_start, _d2_end)
+            )
+
         pc_a, pc_b = st.columns(2)
         with pc_a:
             cmp_range_1 = st.date_input(
                 "Period 1",
-                value=(_d1_start, _d1_end),
                 min_value=_cmp_min,
                 max_value=_cmp_cap,
-                key="ov_cmp_period1",
+                key=_OCK1,
             )
         with pc_b:
             cmp_range_2 = st.date_input(
                 "Period 2",
-                value=(_d2_start, _d2_end),
                 min_value=_cmp_min,
                 max_value=_cmp_cap,
-                key="ov_cmp_period2",
+                key=_OCK2,
             )
+
+        theme.persist_ov_cmp_dates_browser()
 
         def _slice_period(d_all, dr):
             if len(dr) != 2:

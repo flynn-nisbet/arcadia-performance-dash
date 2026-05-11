@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 
 import streamlit as st
@@ -11,6 +12,83 @@ THEME_RADIO_KEY = "arcadia_app_theme"
 # Survives full-page reload when syncing Streamlit host theme (session_state resets on reload).
 THEME_QUERY_KEY = "arcadia_theme"
 _THEME_URL_SIG_KEY = "_arcadia_theme_url_sig"
+
+# Custom period comparison dates: survive theme navigation via localStorage → URL → query restore.
+CMP_LS_KEY_P1 = "arcadia_ov_cmp_p1"
+CMP_LS_KEY_P2 = "arcadia_ov_cmp_p2"
+CMP_QP_P1A = "cmp_p1a"
+CMP_QP_P1B = "cmp_p1b"
+CMP_QP_P2A = "cmp_p2a"
+CMP_QP_P2B = "cmp_p2b"
+_CMP_DATES_SIG_KEY = "_arcadia_cmp_dates_url_sig"
+_CMP_LS_PAYLOAD_SIG_KEY = "_cmp_ls_payload_sig"
+
+
+def restore_cmp_dates_from_query_params() -> None:
+    """Restore Overview custom period ``date_input`` widgets after a theme sync navigation."""
+    from datetime import date as date_cls
+
+    qp = st.query_params
+    keys = (CMP_QP_P1A, CMP_QP_P1B, CMP_QP_P2A, CMP_QP_P2B)
+    if not all(k in qp for k in keys):
+        st.session_state.pop(_CMP_DATES_SIG_KEY, None)
+        return
+
+    def _one(k: str) -> str:
+        v = qp.get(k)
+        if isinstance(v, list):
+            v = v[0] if v else ""
+        return str(v).strip()
+
+    vals = [_one(k) for k in keys]
+    sig = "&".join(f"{k}={vals[i]}" for i, k in enumerate(keys))
+    if st.session_state.get(_CMP_DATES_SIG_KEY) == sig:
+        return
+    try:
+        d1a = date_cls.fromisoformat(vals[0])
+        d1b = date_cls.fromisoformat(vals[1])
+        d2a = date_cls.fromisoformat(vals[2])
+        d2b = date_cls.fromisoformat(vals[3])
+    except ValueError:
+        return
+    st.session_state["ov_cmp_period1"] = (d1a, d1b)
+    st.session_state["ov_cmp_period2"] = (d2a, d2b)
+    st.session_state[_CMP_DATES_SIG_KEY] = sig
+
+
+def persist_ov_cmp_dates_browser() -> None:
+    """Mirror custom period dates to ``localStorage`` so :func:`_sync_streamlit_browser_theme` can pass them through the URL on theme change."""
+    import streamlit.components.v1 as components
+
+    p1 = st.session_state.get("ov_cmp_period1")
+    p2 = st.session_state.get("ov_cmp_period2")
+    if not p1 or len(p1) != 2 or not p2 or len(p2) != 2:
+        return
+    ls_sig = "|".join((str(p1[0]), str(p1[1]), str(p2[0]), str(p2[1])))
+    if st.session_state.get(_CMP_LS_PAYLOAD_SIG_KEY) == ls_sig:
+        return
+    st.session_state[_CMP_LS_PAYLOAD_SIG_KEY] = ls_sig
+    payload1 = json.dumps([str(p1[0]), str(p1[1])])
+    payload2 = json.dumps([str(p2[0]), str(p2[1])])
+    components.html(
+        f"""<script>
+(function () {{
+  try {{
+    var ls = (function () {{
+      try {{ return window.parent.localStorage; }}
+      catch (e) {{
+        try {{ return window.top.localStorage; }}
+        catch (e2) {{ return window.localStorage; }}
+      }}
+    }})();
+    ls.setItem({json.dumps(CMP_LS_KEY_P1)}, {json.dumps(payload1)});
+    ls.setItem({json.dumps(CMP_LS_KEY_P2)}, {json.dumps(payload2)});
+  }} catch (e) {{}}
+}})();
+</script>""",
+        height=0,
+        width=0,
+    )
 
 
 def restore_theme_from_query_params() -> None:
@@ -176,7 +254,7 @@ def _root_variables(light: bool) -> str:
 """
 
 
-def _shared_stylesheet(light: bool) -> str:
+def _shared_stylesheet_uncached(light: bool) -> str:
     st_app_bg_img = (
         ""
         if light
@@ -349,6 +427,10 @@ hr {{ border: none !important; border-top: 1px solid var(--border) !important; m
 """
 
 
+_shared_stylesheet = functools.lru_cache(maxsize=2)(_shared_stylesheet_uncached)
+
+
+@functools.lru_cache(maxsize=1)
 def _light_streamlit_widget_overrides() -> str:
     """Base Web + Glide; menus portal under ``body`` — scope globals in light mode only."""
     return """
@@ -514,6 +596,7 @@ body [data-baseweb="popover"] [role="option"]:hover > div {
 """
 
 
+@functools.lru_cache(maxsize=1)
 def _dark_streamlit_widget_overrides() -> str:
     """Tune widgets to Arcadia dark tokens. ``config.toml`` uses ``base = "dark"`` so Glide/menus
     are already dark from Streamlit; these rules align grays/accent with the rest of the app."""
@@ -704,6 +787,24 @@ def _sync_streamlit_browser_theme(light: bool) -> None:
     }})();
     var u = new URL(href);
     u.searchParams.set({json.dumps(THEME_QUERY_KEY)}, desired === "Light" ? "light" : "dark");
+    try {{
+      var j1 = storage().getItem({json.dumps(CMP_LS_KEY_P1)});
+      var j2 = storage().getItem({json.dumps(CMP_LS_KEY_P2)});
+      if (j1) {{
+        var o1 = JSON.parse(j1);
+        if (o1 && o1.length === 2) {{
+          u.searchParams.set({json.dumps(CMP_QP_P1A)}, String(o1[0]));
+          u.searchParams.set({json.dumps(CMP_QP_P1B)}, String(o1[1]));
+        }}
+      }}
+      if (j2) {{
+        var o2 = JSON.parse(j2);
+        if (o2 && o2.length === 2) {{
+          u.searchParams.set({json.dumps(CMP_QP_P2A)}, String(o2[0]));
+          u.searchParams.set({json.dumps(CMP_QP_P2B)}, String(o2[1]));
+        }}
+      }}
+    }} catch (e3) {{}}
     try {{ window.parent.location.href = u.toString(); }}
     catch (e) {{ window.top.location.href = u.toString(); }}
   }} catch (e) {{}}
