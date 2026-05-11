@@ -8,6 +8,17 @@ import os
 import hashlib
 from datetime import timedelta, date
 
+
+def report_through_date() -> date:
+    """Last full day included in date filters and WTD metrics (excludes unreliable intra-day 'today')."""
+    return date.today() - timedelta(days=1)
+
+
+def monday_of_week_containing(d: date) -> date:
+    """Monday-start calendar week containing ``d`` (``d.weekday()``: Mon=0 … Sun=6)."""
+    return d - timedelta(days=d.weekday())
+
+
 st.set_page_config(
     page_title="Arcadia Performance Dash",
     page_icon="⚡",
@@ -202,10 +213,13 @@ PLOT_LAYOUT_DARK = dict(
 PLOT_LAYOUT_LIGHT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="DM Sans, sans-serif", color="#64748b", size=12),
-    xaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1"),
-    yaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1"),
-    legend=dict(bgcolor="rgba(255,255,255,0.94)", bordercolor="#cbd5e1", borderwidth=1, font=dict(size=11, color="#64748b")),
+    font=dict(family="DM Sans, sans-serif", color="#1e293b", size=12),  # was #64748b
+    xaxis=dict(gridcolor="#e2e8f0", linecolor="#94a3b8", tickcolor="#94a3b8",
+               zerolinecolor="#cbd5e1", tickfont=dict(color="#334155")),
+    yaxis=dict(gridcolor="#e2e8f0", linecolor="#94a3b8", tickcolor="#94a3b8",
+               zerolinecolor="#cbd5e1", tickfont=dict(color="#334155")),
+    legend=dict(bgcolor="rgba(255,255,255,0.96)", bordercolor="#cbd5e1",
+                borderwidth=1, font=dict(size=11, color="#1e293b")),  # was #64748b
     colorway=PLOT_COLORWAY,
 )
 
@@ -219,8 +233,15 @@ def chart_theme_is_light() -> bool:
 
 def plotly_axis_lines():
     if chart_theme_is_light():
-        return dict(gridcolor="#e2e8f0", linecolor="#cbd5e1", tickcolor="#cbd5e1", zerolinecolor="#cbd5e1")
-    return dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a")
+        return dict(
+            gridcolor="#e2e8f0", linecolor="#94a3b8",
+            tickcolor="#94a3b8", zerolinecolor="#cbd5e1",
+            tickfont=dict(color="#334155"),
+        )
+    return dict(
+        gridcolor="#1e2330", linecolor="#252b3a",
+        tickcolor="#252b3a", zerolinecolor="#252b3a",
+    )
 
 
 def apply_chart_theme(fig, **extra):
@@ -340,7 +361,10 @@ with st.sidebar:
     st.title("Filters")
 
     min_d = df_raw["call_date_est"].min().date()
-    max_d = df_raw["call_date_est"].max().date()
+    max_d_data = df_raw["call_date_est"].max().date()
+    max_d = min(max_d_data, report_through_date())
+    if max_d < min_d:
+        max_d = min_d
     default_start = max(min_d, max_d - timedelta(days=6))
 
     date_range = st.date_input(
@@ -352,6 +376,7 @@ with st.sidebar:
     )
 
     center_opts   = sorted(df_raw["center_location"].dropna().unique().tolist()) if "center_location" in df_raw.columns else []
+    center_opts   = [c for c in center_opts if c != "Z - Default Location"]
     mkt_opts      = sorted(df_raw["marketing_bucket"].dropna().unique().tolist()) if "marketing_bucket" in df_raw.columns else []
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
     tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
@@ -444,30 +469,30 @@ def parse_display_pct(val):
     except ValueError:
         return None
 
-def delta_str_pct(cur, prev):
-    if pd.isna(cur) or pd.isna(prev) or prev == 0:
-        return None
-    return f"{(cur - prev) * 100:+.1f}pp vs prior week"
-
-def delta_str_dollar(cur, prev):
-    if pd.isna(cur) or pd.isna(prev):
-        return None
-    return f"${cur - prev:+,.0f} vs prior week"
-
-def week_kpi(source, metric_fn):
-    """Returns (this_week_val, prev_week_val) using last 2 ISO weeks."""
+def wtd_vs_four_week_avg(source, metric_fn):
+    """Partial Mon–Sun week through ``report_through_date()`` vs mean of four prior full Mon–Sun weeks."""
     if "call_date_est" not in source.columns:
         return None, None
     tmp = source.dropna(subset=["call_date_est"]).copy()
-    tmp["week"] = tmp["call_date_est"].dt.to_period("W")
-    weeks = sorted(tmp["week"].unique())
-    if not weeks:
+    if tmp.empty:
         return None, None
-    this_w = weeks[-1]
-    prev_w = weeks[-2] if len(weeks) >= 2 else None
-    this_v = metric_fn(tmp[tmp["week"] == this_w])
-    prev_v = metric_fn(tmp[tmp["week"] == prev_w]) if prev_w else None
-    return this_v, prev_v
+    as_of = report_through_date()
+    week_start = monday_of_week_containing(as_of)
+
+    def _slice(d0: date, d1: date):
+        m = (tmp["call_date_est"].dt.date >= d0) & (tmp["call_date_est"].dt.date <= d1)
+        return tmp.loc[m]
+
+    cur = metric_fn(_slice(week_start, as_of))
+    prior_week_vals = []
+    for i in range(1, 5):
+        mon = week_start - timedelta(days=7 * i)
+        sun = mon + timedelta(days=6)
+        prior_week_vals.append(metric_fn(_slice(mon, sun)))
+    baseline = float(np.nanmean(prior_week_vals)) if prior_week_vals else float("nan")
+    if prior_week_vals and all(pd.isna(v) for v in prior_week_vals):
+        baseline = float("nan")
+    return cur, baseline
 
 # ── Core metric computations ───────────────────────────────────────────────────
 def compute_kpis(d):
@@ -528,45 +553,47 @@ tab_overview, tab_agent, tab_lift = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_overview:
 
-    # ── Top KPI row — always last week vs prior week, ignores date filter ──────
-    st.subheader("Last Week vs Prior Week")
-    st.caption("Automatically compares the two most recent ISO weeks · ignores date filter")
+    # ── Top KPI row — partial Mon–Sun week (through yesterday) vs 4-wk avg, ignores date filter ─
+    st.subheader("Performance So Far This Week")
+    st.caption(
+        "Mon–Sun calendar weeks · compares the partial current week (through yesterday) to the average "
+        "of the four prior full weeks · ignores date filter · Center and other sidebar filters apply"
+    )
 
     def _wk_raw(fn):
-        """Uses df_raw with sidebar filters except date (week KPIs are always last 2 ISO weeks)."""
-        return week_kpi(apply_filters(df_raw.copy(), use_date_range=False), fn)
+        """Uses df_raw with sidebar filters except date."""
+        return wtd_vs_four_week_avg(apply_filters(df_raw.copy(), use_date_range=False), fn)
 
-    def wk_pct_delta(cur, prev):
-        if cur is None or prev is None or pd.isna(cur) or pd.isna(prev) or prev == 0:
+    def wk_pct_delta_vs_avg(cur, baseline):
+        if cur is None or baseline is None or pd.isna(cur) or pd.isna(baseline) or baseline == 0:
             return None
-        return f"{(cur / prev - 1) * 100:+.1f}% vs prior wk"
+        return f"{(cur / baseline - 1) * 100:+.1f}% vs 4-wk avg"
 
-    # Compute last-week values for display (not filtered by date)
-    def last_week_val(fn):
-        this_v, _ = _wk_raw(fn)
-        return this_v
+    def wtd_display_val(fn):
+        cur, _ = _wk_raw(fn)
+        return cur
 
-    lw_rev_call  = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
-    lw_net_conv  = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
-    lw_rev_order = last_week_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
-    lw_cic       = last_week_val(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
-    lw_tt        = last_week_val(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
+    lw_rev_call  = wtd_display_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
+    lw_net_conv  = wtd_display_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
+    lw_rev_order = wtd_display_val(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
+    lw_cic       = wtd_display_val(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
+    lw_tt        = wtd_display_val(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
-    cv1, pv1 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
-    cv2, pv2 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
-    cv3, pv3 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
-    cv4, pv4 = _wk_raw(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
-    cv5, pv5 = _wk_raw(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
+    cv1, bv1 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, top_funnel_call_count(d)))
+    cv2, bv2 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0, top_funnel_call_count(d)))
+    cv3, bv3 = _wk_raw(lambda d: safe_rate(d.loc[order_revenue_mask(d), "total_revenue"].sum() if "total_revenue" in d.columns else 0, d.loc[order_revenue_mask(d), "orders"].sum() if "orders" in d.columns else 0))
+    cv4, bv4 = _wk_raw(lambda d: safe_rate(d.loc[top_funnel_mask(d), "credit_calls_flag"].sum() if "credit_calls_flag" in d.columns else 0, top_funnel_call_count(d)))
+    cv5, bv5 = _wk_raw(lambda d: d.loc[top_funnel_mask(d), "talk_time_minutes"].mean() if "talk_time_minutes" in d.columns else float("nan"))
 
     km1, km2, km3, km4, km5 = st.columns(5)
-    km1.metric("Rev / Call",         f"${lw_rev_call:,.2f}"  if lw_rev_call  and not pd.isna(lw_rev_call)  else "—", delta=wk_pct_delta(cv1, pv1))
-    km2.metric("Net Conversion",     f"{lw_net_conv:.1%}"    if lw_net_conv  and not pd.isna(lw_net_conv)  else "—", delta=wk_pct_delta(cv2, pv2))
-    km3.metric("Rev / Order",        f"${lw_rev_order:,.2f}" if lw_rev_order and not pd.isna(lw_rev_order) else "—", delta=wk_pct_delta(cv3, pv3))
-    km4.metric("Calls Into Credit",  f"{lw_cic:.1%}"         if lw_cic       and not pd.isna(lw_cic)       else "—", delta=wk_pct_delta(cv4, pv4))
+    km1.metric("Rev / Call",         f"${lw_rev_call:,.2f}"  if lw_rev_call  and not pd.isna(lw_rev_call)  else "—", delta=wk_pct_delta_vs_avg(cv1, bv1))
+    km2.metric("Net Conversion",     f"{lw_net_conv:.1%}"    if lw_net_conv  and not pd.isna(lw_net_conv)  else "—", delta=wk_pct_delta_vs_avg(cv2, bv2))
+    km3.metric("Rev / Order",        f"${lw_rev_order:,.2f}" if lw_rev_order and not pd.isna(lw_rev_order) else "—", delta=wk_pct_delta_vs_avg(cv3, bv3))
+    km4.metric("Calls Into Credit",  f"{lw_cic:.1%}"         if lw_cic       and not pd.isna(lw_cic)       else "—", delta=wk_pct_delta_vs_avg(cv4, bv4))
     km5.metric(
         "Talk Time",
         f"{lw_tt:.1f} min" if lw_tt and not pd.isna(lw_tt) else "—",
-        delta=wk_pct_delta(cv5, pv5),
+        delta=wk_pct_delta_vs_avg(cv5, bv5),
         delta_color="inverse",
     )
 
@@ -676,14 +703,17 @@ with tab_overview:
     if "call_date_est" in df_cmp.columns and len(df_cmp) > 0:
         _cmp_min = df_cmp["call_date_est"].min().date()
         _cmp_max = df_cmp["call_date_est"].max().date()
+        _cmp_cap = min(_cmp_max, report_through_date())
+        if _cmp_cap < _cmp_min:
+            _cmp_cap = _cmp_min
         _w = timedelta(days=6)
-        _d2_end = _cmp_max
+        _d2_end = max(_cmp_min, _cmp_cap)
         _d2_start = max(_cmp_min, _d2_end - _w)
         _d1_end = _d2_start - timedelta(days=1)
         _d1_start = max(_cmp_min, _d1_end - _w)
         if _d1_start > _d1_end:
             _d1_start = _cmp_min
-            _d1_end = min(_cmp_max, _d1_start + _w)
+            _d1_end = min(_cmp_cap, _d1_start + _w)
 
         pc_a, pc_b = st.columns(2)
         with pc_a:
@@ -691,7 +721,7 @@ with tab_overview:
                 "Period 1",
                 value=(_d1_start, _d1_end),
                 min_value=_cmp_min,
-                max_value=_cmp_max,
+                max_value=_cmp_cap,
                 key="ov_cmp_period1",
             )
         with pc_b:
@@ -699,7 +729,7 @@ with tab_overview:
                 "Period 2",
                 value=(_d2_start, _d2_end),
                 min_value=_cmp_min,
-                max_value=_cmp_max,
+                max_value=_cmp_cap,
                 key="ov_cmp_period2",
             )
 
@@ -869,7 +899,7 @@ with tab_overview:
 
         fig_ov_trend = go.Figure()
         _ax_ov = plotly_axis_lines()
-        _muted = "#64748b" if chart_theme_is_light() else "#8b95aa"
+        _muted = "#475569" if chart_theme_is_light() else "#8b95aa"
 
         if ov_group_col and ov_group_col in ov_ts_df.columns:
             for group_val, grp_c in ov_ts_df.groupby(ov_group_col):
@@ -1224,6 +1254,9 @@ with tab_lift:
     )
     min_post_date = post_dates.min().date()
     max_post_date = post_dates.max().date()
+    max_post_selectable = min(max_post_date, report_through_date())
+    if max_post_selectable < min_post_date:
+        max_post_selectable = min_post_date
 
     lift_date_col1, lift_date_col2 = st.columns(2)
     with lift_date_col1:
@@ -1231,15 +1264,15 @@ with tab_lift:
             "Post Period From",
             value=min_post_date,
             min_value=min_post_date,
-            max_value=max_post_date,
+            max_value=max_post_selectable,
             key="lift_start_date",
         )
     with lift_date_col2:
         lift_end_date = st.date_input(
             "Post Period To",
-            value=max_post_date,
+            value=max_post_selectable,
             min_value=min_post_date,
-            max_value=max_post_date,
+            max_value=max_post_selectable,
             key="lift_end_date",
         )
 
