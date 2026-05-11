@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import streamlit as st
 
 # Persisted choice: first option is default (Dark) on first visit.
@@ -13,14 +15,15 @@ def is_light_theme() -> bool:
     return st.session_state.get(THEME_RADIO_KEY, "Dark") == "Light"
 
 
-def render_app_theme_toggle() -> None:
-    """Sidebar control: Dark (default) or Light custom theme."""
-    st.radio(
-        "App theme",
+def render_app_theme_toggle() -> str:
+    """Sidebar control: Dark (default) or Light. Returns current selection (no visible label)."""
+    return st.radio(
+        "Theme",
         ["Dark", "Light"],
         horizontal=True,
         key=THEME_RADIO_KEY,
-        help="Custom Arcadia styling for the page and chart exports.",
+        label_visibility="collapsed",
+        help="Page and chart colors: Dark or Light.",
     )
 
 
@@ -49,6 +52,40 @@ def _root_variables(light: bool) -> str:
     --header-bg:     rgba(255, 255, 255, 0.97);
     --header-border: #e2e8f0;
     --scrollbar-track: #f1f5f9;
+
+    /* Streamlit widget / shell tokens (many components read these) */
+    --st-color-text: #0f172a;
+    --st-color-body-text: #0f172a;
+    --st-color-heading: #0f172a;
+    --st-color-background: #ffffff;
+    --st-color-secondary-background: #f8fafc;
+    --st-color-surface: #ffffff;
+    --st-color-border: #e2e8f0;
+    --st-color-input-background: #ffffff;
+    --st-color-widget-background: #ffffff;
+    --st-color-widget-border: #cbd5e1;
+    --st-color-text-input: #0f172a;
+    --st-color-menu-background: #ffffff;
+    --st-color-menu-text: #0f172a;
+
+    /* Glide data grid (st.dataframe) — see glide-data-grid theme / --gdg-* */
+    --gdg-bg-cell: #ffffff;
+    --gdg-bg-cell-medium: #f8fafc;
+    --gdg-bg-header: #f1f5f9;
+    --gdg-bg-header-hovered: #e2e8f0;
+    --gdg-bg-header-has: #dbeafe;
+    --gdg-text-dark: #0f172a;
+    --gdg-text-medium: #334155;
+    --gdg-text-light: #64748b;
+    --gdg-text-header: #0f172a;
+    --gdg-border-color: #e2e8f0;
+    --gdg-horizontal-border-color: #e2e8f0;
+    --gdg-accent-color: #3d8ef8;
+    --gdg-accent-fg: #ffffff;
+    --gdg-accent-light: rgba(61, 142, 248, 0.22);
+    --gdg-font-family: "DM Sans", sans-serif;
+    --gdg-base-font-style: 13px "DM Sans", sans-serif;
+    --gdg-header-font-style: 600 12px "DM Sans", sans-serif;
 }
 """
     return """
@@ -74,6 +111,38 @@ def _root_variables(light: bool) -> str:
     --header-bg:     rgba(13, 15, 20, 0.92);
     --header-border: #252b3a;
     --scrollbar-track: #0d0f14;
+
+    --st-color-text: #e8ecf4;
+    --st-color-body-text: #e8ecf4;
+    --st-color-heading: #e8ecf4;
+    --st-color-background: #0d0f14;
+    --st-color-secondary-background: #13161d;
+    --st-color-surface: #181c25;
+    --st-color-border: #252b3a;
+    --st-color-input-background: #181c25;
+    --st-color-widget-background: #181c25;
+    --st-color-widget-border: #2e3649;
+    --st-color-text-input: #e8ecf4;
+    --st-color-menu-background: #181c25;
+    --st-color-menu-text: #e8ecf4;
+
+    --gdg-bg-cell: #13161d;
+    --gdg-bg-cell-medium: #181c25;
+    --gdg-bg-header: #181c25;
+    --gdg-bg-header-hovered: #1e2330;
+    --gdg-bg-header-has: rgba(61, 142, 248, 0.18);
+    --gdg-text-dark: #e8ecf4;
+    --gdg-text-medium: #8b95aa;
+    --gdg-text-light: #64748b;
+    --gdg-text-header: #8b95aa;
+    --gdg-border-color: #252b3a;
+    --gdg-horizontal-border-color: #252b3a;
+    --gdg-accent-color: #3d8ef8;
+    --gdg-accent-fg: #ffffff;
+    --gdg-accent-light: rgba(61, 142, 248, 0.22);
+    --gdg-font-family: "DM Sans", sans-serif;
+    --gdg-base-font-style: 13px "DM Sans", sans-serif;
+    --gdg-header-font-style: 600 12px "DM Sans", sans-serif;
 }
 """
 
@@ -118,7 +187,7 @@ html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {{
 }}
 
 .main .block-container {{
-    padding: 2rem 2.5rem 4rem !important;
+    padding: 2.75rem 2.5rem 4rem !important;
     max-width: 1600px !important;
 }}
 
@@ -160,6 +229,7 @@ h3 {{ font-size: 1rem !important; font-weight: 600 !important; }}
     font-weight: 800 !important;
     letter-spacing: -0.02em !important;
     padding-bottom: 0.1em;
+    margin-top: 0.75rem !important;
 }}
 
 .stCaptionContainer, [data-testid="stCaptionContainer"], small, caption {{
@@ -250,9 +320,370 @@ hr {{ border: none !important; border-top: 1px solid var(--border) !important; m
 """
 
 
-def inject_app_styles() -> None:
-    """Inject global CSS after sidebar widgets (so ``is_light_theme()`` is current)."""
-    st.markdown(
-        f"<style>{_shared_stylesheet(is_light_theme())}</style>",
-        unsafe_allow_html=True,
+def _light_streamlit_widget_overrides() -> str:
+    """Base Web + Glide; menus portal under ``body`` — scope globals in light mode only."""
+    return """
+/* ── In-app selects / inputs (sidebar + main) ─────────────────────────────── */
+[data-testid="stAppViewContainer"] [data-baseweb="select"] > div,
+[data-testid="stAppViewContainer"] [data-baseweb="input"],
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"] {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+[data-testid="stAppViewContainer"] [data-baseweb="select"] span,
+[data-testid="stAppViewContainer"] [data-baseweb="input"] input,
+[data-testid="stAppViewContainer"] [data-baseweb="textarea"],
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="input"] input {
+  color: #0f172a !important;
+}
+[data-testid="stAppViewContainer"] [data-baseweb="tag"],
+[data-testid="stSidebar"] [data-baseweb="tag"] {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* ── Portaled dropdowns / calendars (render outside stAppViewContainer) ───── */
+body [data-baseweb="popover"],
+body [data-baseweb="popover"] > div {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12) !important;
+}
+body [data-baseweb="layer"],
+body [data-baseweb="layer"] > div {
+  color: #0f172a !important;
+}
+body [data-baseweb="menu"],
+body [data-baseweb="menu"] ul {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+body [data-baseweb="menu"] li,
+body [data-baseweb="menu"] li > div,
+body [data-baseweb="menu"] a,
+body [data-baseweb="menu"] [role="option"],
+body [data-baseweb="menu"] [role="menuitem"] {
+  color: #0f172a !important;
+  background-color: #ffffff !important;
+}
+body [data-baseweb="menu"] li:hover,
+body [data-baseweb="menu"] [role="option"]:hover,
+body [data-baseweb="menu"] [aria-selected="true"] {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+body ul[role="listbox"],
+body ul[role="listbox"] li {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+body ul[role="listbox"] li:hover,
+body ul[role="listbox"] li[aria-selected="true"] {
+  background-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Date / time picker panels */
+body [data-baseweb="calendar"],
+body [data-baseweb="calendar"] button {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* Popover inner chrome (Base Web stacks nested divs; text can inherit dark theme) */
+body [data-baseweb="popover"] div,
+body [data-baseweb="popover"] span,
+body [data-baseweb="popover"] p,
+body [data-baseweb="popover"] li {
+  color: #0f172a !important;
+}
+body [data-baseweb="popover"] [tabindex="0"],
+body [data-baseweb="popover"] [role="listbox"],
+body [data-baseweb="popover"] [role="presentation"] {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* Virtualized / div-based options (Streamlit 1.5x Base Web) */
+body [data-baseweb="popover"] [role="option"],
+body [data-baseweb="popover"] [role="option"] > div,
+body [data-baseweb="popover"] [role="option"][aria-selected="true"],
+body [data-baseweb="popover"] [role="option"][aria-selected="true"] > div {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+body [data-baseweb="popover"] [role="option"]:hover,
+body [data-baseweb="popover"] [role="option"]:hover > div {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+
+/* ── st.dataframe / Glide (canvas reads --gdg-* from nodes; beat inline with !important) ─ */
+[data-testid="stDataFrame"],
+[data-testid="StyledDataFrame"] {
+  --gdg-bg-cell: #ffffff !important;
+  --gdg-bg-cell-medium: #f8fafc !important;
+  --gdg-bg-header: #f1f5f9 !important;
+  --gdg-bg-header-hovered: #e2e8f0 !important;
+  --gdg-bg-header-has: #dbeafe !important;
+  --gdg-text-dark: #0f172a !important;
+  --gdg-text-medium: #334155 !important;
+  --gdg-text-light: #64748b !important;
+  --gdg-text-header: #0f172a !important;
+  --gdg-border-color: #e2e8f0 !important;
+  --gdg-horizontal-border-color: #e2e8f0 !important;
+  --gdg-accent-color: #3d8ef8 !important;
+  --gdg-accent-fg: #ffffff !important;
+  --gdg-accent-light: rgba(61, 142, 248, 0.22) !important;
+  --gdg-font-family: "DM Sans", sans-serif !important;
+  --gdg-base-font-style: 13px "DM Sans", sans-serif !important;
+  --gdg-header-font-style: 600 12px "DM Sans", sans-serif !important;
+}
+[data-testid="stDataFrame"] *,
+[data-testid="StyledDataFrame"] * {
+  --gdg-bg-cell: #ffffff !important;
+  --gdg-bg-cell-medium: #f8fafc !important;
+  --gdg-bg-header: #f1f5f9 !important;
+  --gdg-bg-header-hovered: #e2e8f0 !important;
+  --gdg-bg-header-has: #dbeafe !important;
+  --gdg-text-dark: #0f172a !important;
+  --gdg-text-medium: #334155 !important;
+  --gdg-text-light: #64748b !important;
+  --gdg-text-header: #0f172a !important;
+  --gdg-border-color: #e2e8f0 !important;
+  --gdg-horizontal-border-color: #e2e8f0 !important;
+  --gdg-accent-color: #3d8ef8 !important;
+  --gdg-accent-fg: #ffffff !important;
+  --gdg-accent-light: rgba(61, 142, 248, 0.22) !important;
+  --gdg-font-family: "DM Sans", sans-serif !important;
+  --gdg-base-font-style: 13px "DM Sans", sans-serif !important;
+  --gdg-header-font-style: 600 12px "DM Sans", sans-serif !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataFrame"] [role="gridcell"],
+[data-testid="StyledDataFrame"] [role="columnheader"],
+[data-testid="StyledDataFrame"] [role="gridcell"] {
+  color: #0f172a !important;
+  background-color: #ffffff !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="StyledDataFrame"] [role="columnheader"] {
+  background-color: #f1f5f9 !important;
+}
+
+/* Download / secondary-style actions */
+[data-testid="stAppViewContainer"] .stDownloadButton button {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  border: 1px solid #cbd5e1 !important;
+}
+"""
+
+
+def _dark_streamlit_widget_overrides() -> str:
+    """Tune widgets to Arcadia dark tokens. ``config.toml`` uses ``base = "dark"`` so Glide/menus
+    are already dark from Streamlit; these rules align grays/accent with the rest of the app."""
+    return """
+/* ── In-app selects / inputs (sidebar + main) ─────────────────────────────── */
+[data-testid="stAppViewContainer"] [data-baseweb="select"] > div,
+[data-testid="stAppViewContainer"] [data-baseweb="input"],
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"] {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+  border-color: #2e3649 !important;
+}
+[data-testid="stAppViewContainer"] [data-baseweb="select"] span,
+[data-testid="stAppViewContainer"] [data-baseweb="input"] input,
+[data-testid="stAppViewContainer"] [data-baseweb="textarea"],
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="input"] input {
+  color: #e8ecf4 !important;
+}
+[data-testid="stAppViewContainer"] [data-baseweb="tag"],
+[data-testid="stSidebar"] [data-baseweb="tag"] {
+  background-color: #2e3649 !important;
+  color: #e8ecf4 !important;
+}
+
+/* ── Portaled dropdowns / calendars ───────────────────────────────────────── */
+body [data-baseweb="popover"],
+body [data-baseweb="popover"] > div {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+  border-color: #2e3649 !important;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
+}
+body [data-baseweb="layer"],
+body [data-baseweb="layer"] > div {
+  color: #e8ecf4 !important;
+}
+body [data-baseweb="menu"],
+body [data-baseweb="menu"] ul {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+  border-color: #2e3649 !important;
+}
+body [data-baseweb="menu"] li,
+body [data-baseweb="menu"] li > div,
+body [data-baseweb="menu"] a,
+body [data-baseweb="menu"] [role="option"],
+body [data-baseweb="menu"] [role="menuitem"] {
+  color: #e8ecf4 !important;
+  background-color: #181c25 !important;
+}
+body [data-baseweb="menu"] li:hover,
+body [data-baseweb="menu"] [role="option"]:hover,
+body [data-baseweb="menu"] [aria-selected="true"] {
+  background-color: #1e2330 !important;
+  color: #e8ecf4 !important;
+}
+body ul[role="listbox"],
+body ul[role="listbox"] li {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+}
+body ul[role="listbox"] li:hover,
+body ul[role="listbox"] li[aria-selected="true"] {
+  background-color: #1e2330 !important;
+  color: #e8ecf4 !important;
+}
+
+body [data-baseweb="calendar"],
+body [data-baseweb="calendar"] button {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+}
+
+body [data-baseweb="popover"] div,
+body [data-baseweb="popover"] span,
+body [data-baseweb="popover"] p,
+body [data-baseweb="popover"] li {
+  color: #e8ecf4 !important;
+}
+body [data-baseweb="popover"] [tabindex="0"],
+body [data-baseweb="popover"] [role="listbox"],
+body [data-baseweb="popover"] [role="presentation"] {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+}
+
+/* ── st.dataframe / Glide (match Arcadia palette; !important vs any inline tokens) ─ */
+[data-testid="stDataFrame"],
+[data-testid="StyledDataFrame"] {
+  --gdg-bg-cell: #13161d !important;
+  --gdg-bg-cell-medium: #181c25 !important;
+  --gdg-bg-header: #181c25 !important;
+  --gdg-bg-header-hovered: #1e2330 !important;
+  --gdg-bg-header-has: rgba(61, 142, 248, 0.18) !important;
+  --gdg-text-dark: #e8ecf4 !important;
+  --gdg-text-medium: #8b95aa !important;
+  --gdg-text-light: #64748b !important;
+  --gdg-text-header: #8b95aa !important;
+  --gdg-border-color: #252b3a !important;
+  --gdg-horizontal-border-color: #252b3a !important;
+  --gdg-accent-color: #3d8ef8 !important;
+  --gdg-accent-fg: #ffffff !important;
+  --gdg-accent-light: rgba(61, 142, 248, 0.22) !important;
+  --gdg-font-family: "DM Sans", sans-serif !important;
+  --gdg-base-font-style: 13px "DM Sans", sans-serif !important;
+  --gdg-header-font-style: 600 12px "DM Sans", sans-serif !important;
+}
+[data-testid="stDataFrame"] *,
+[data-testid="StyledDataFrame"] * {
+  --gdg-bg-cell: #13161d !important;
+  --gdg-bg-cell-medium: #181c25 !important;
+  --gdg-bg-header: #181c25 !important;
+  --gdg-bg-header-hovered: #1e2330 !important;
+  --gdg-bg-header-has: rgba(61, 142, 248, 0.18) !important;
+  --gdg-text-dark: #e8ecf4 !important;
+  --gdg-text-medium: #8b95aa !important;
+  --gdg-text-light: #64748b !important;
+  --gdg-text-header: #8b95aa !important;
+  --gdg-border-color: #252b3a !important;
+  --gdg-horizontal-border-color: #252b3a !important;
+  --gdg-accent-color: #3d8ef8 !important;
+  --gdg-accent-fg: #ffffff !important;
+  --gdg-accent-light: rgba(61, 142, 248, 0.22) !important;
+  --gdg-font-family: "DM Sans", sans-serif !important;
+  --gdg-base-font-style: 13px "DM Sans", sans-serif !important;
+  --gdg-header-font-style: 600 12px "DM Sans", sans-serif !important;
+}
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="StyledDataFrame"] [role="columnheader"] {
+  color: #8b95aa !important;
+  background-color: #181c25 !important;
+}
+
+/* Download / secondary actions */
+[data-testid="stAppViewContainer"] .stDownloadButton button {
+  background-color: #181c25 !important;
+  color: #e8ecf4 !important;
+  border: 1px solid #2e3649 !important;
+}
+"""
+
+
+def _sync_streamlit_browser_theme(light: bool) -> None:
+    """Align Streamlit’s internal Light/Dark theme (Glide canvas, Base Web) with the sidebar.
+
+    The host stores Settings → Theme under ``localStorage['stActiveTheme-' + pathname + '-v2']``
+    (see Streamlit ``storageUtils.ts``). If it differs from the sidebar choice, set it and reload
+    once so ``st.dataframe`` uses the correct palette from ``[theme.light]`` / ``[theme.dark]``.
+    """
+    import streamlit.components.v1 as components
+
+    desired = "Light" if light else "Dark"
+    components.html(
+        f"""<script>
+(function () {{
+  var desired = {json.dumps(desired)};
+  function storage() {{
+    try {{ return window.parent.localStorage; }}
+    catch (e) {{
+      try {{ return window.top.localStorage; }}
+      catch (e2) {{ return window.localStorage; }}
+    }}
+  }}
+  function path() {{
+    try {{ return window.parent.location.pathname; }}
+    catch (e) {{
+      try {{ return window.top.location.pathname; }}
+      catch (e2) {{ return window.location.pathname; }}
+    }}
+  }}
+  try {{
+    var key = "stActiveTheme-" + path() + "-v2";
+    var raw = storage().getItem(key);
+    var cur = null;
+    if (raw) {{
+      try {{ cur = JSON.parse(raw); }} catch (e) {{}}
+    }}
+    if (cur === desired) return;
+    storage().setItem(key, JSON.stringify(desired));
+    try {{ window.parent.location.reload(); }}
+    catch (e) {{ window.top.location.reload(); }}
+  }} catch (e) {{}}
+}})();
+</script>""",
+        height=0,
+        width=0,
     )
+
+
+def inject_app_styles(light: bool | None = None) -> None:
+    """Inject global CSS. Pass ``light`` from the theme radio return value for a guaranteed match."""
+    if light is None:
+        light = is_light_theme()
+    css = _shared_stylesheet(light)
+    if light:
+        css += _light_streamlit_widget_overrides()
+    else:
+        css += _dark_streamlit_widget_overrides()
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+    _sync_streamlit_browser_theme(light)

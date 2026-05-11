@@ -128,8 +128,6 @@ except Exception as e:
 
 # ── Sidebar Filters ────────────────────────────────────────────────────────────
 with st.sidebar:
-    theme.render_app_theme_toggle()
-    st.divider()
     st.title("Filters")
 
     min_d = df_raw["call_date_est"].min().date()
@@ -159,7 +157,10 @@ with st.sidebar:
     sel_tenure   = st.multiselect("Tenure Bucket",    options=tenure_opts,   default=[], key="f_tenure")
     sel_calltype = st.multiselect("Site/SERP",        options=calltype_opts, default=[], key="f_calltype")
 
-theme.inject_app_styles()
+    st.divider()
+    _arcadia_theme_choice = theme.render_app_theme_toggle()
+
+theme.inject_app_styles(light=_arcadia_theme_choice == "Light")
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
@@ -224,12 +225,19 @@ def pct_change_cell_style(metric_id: str, pct_num: float, neutral_abs: float = 1
     """CSS for a numeric % change. metric_id = funnel 'Metric' name or lift KPI key (e.g. 'tt')."""
     if pct_num is None or (isinstance(pct_num, float) and (pd.isna(pct_num) or np.isinf(pct_num))):
         return ""
+    light = theme.is_light_theme()
     if abs(float(pct_num)) < neutral_abs:
+        if light:
+            return "background-color: #fef9c3; color: #854d0e"
         return "background-color: #2a2a1a; color: #c8a000"
     lower_better = metric_id in FUNNEL_METRIC_LOWER_IS_BETTER or metric_id in LIFT_KPI_LOWER_IS_BETTER
     good = (float(pct_num) < 0) if lower_better else (float(pct_num) > 0)
     if good:
+        if light:
+            return "background-color: #dcfce7; color: #166534"
         return "background-color: #0f2a1a; color: #22c55e"
+    if light:
+        return "background-color: #ffe4e6; color: #be123c"
     return "background-color: #2a1018; color: #f43f5e"
 
 

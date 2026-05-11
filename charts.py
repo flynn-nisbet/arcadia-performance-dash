@@ -95,8 +95,24 @@ def plotly_axis_lines():
 
 
 def apply_chart_theme(fig: go.Figure, **extra):
+    """Merge base theme with ``extra``; partial ``legend`` / ``xaxis`` dicts are shallow-merged into base."""
     base = PLOT_LAYOUT_LIGHT if is_light_theme() else PLOT_LAYOUT_DARK
-    fig.update_layout(**{**base, **extra})
+    merged = dict(base)
+    for key, val in extra.items():
+        if key == "legend" and isinstance(val, dict) and isinstance(merged.get("legend"), dict):
+            merged["legend"] = {**merged["legend"], **val}
+        elif key in ("xaxis", "yaxis") and isinstance(val, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **val}
+        else:
+            merged[key] = val
+    fig.update_layout(**merged)
+    if is_light_theme():
+        fig.update_layout(
+            font=dict(family="DM Sans, sans-serif", color="#0f172a", size=12),
+            legend_font_color="#0f172a",
+        )
+        fig.update_yaxes(title_font_color="#0f172a")
+        fig.update_xaxes(title_font_color="#0f172a")
     return fig
 
 
