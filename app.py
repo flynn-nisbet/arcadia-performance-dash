@@ -200,26 +200,62 @@ hr { border: none !important; border-top: 1px solid var(--st-border-color, var(-
 # ── Plotly themes (match app dark / Streamlit light) ───────────────────────────
 PLOT_COLORWAY = ["#3d8ef8", "#22d3c8", "#f5a623", "#f43f5e", "#a78bfa", "#22c55e"]
 
+# Solid paper/plot colors so PNG exports (Plotly camera) match on-screen dark vs light mode.
 PLOT_LAYOUT_DARK = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="DM Sans, sans-serif", color="#8b95aa", size=12),
-    xaxis=dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a"),
-    yaxis=dict(gridcolor="#1e2330", linecolor="#252b3a", tickcolor="#252b3a", zerolinecolor="#252b3a"),
-    legend=dict(bgcolor="rgba(19,22,29,0.8)", bordercolor="#252b3a", borderwidth=1, font=dict(size=11, color="#8b95aa")),
+    paper_bgcolor="#0d0f14",
+    plot_bgcolor="#13161d",
+    font=dict(family="DM Sans, sans-serif", color="#e8ecf4", size=12),
+    xaxis=dict(
+        gridcolor="#252b3a",
+        linecolor="#2e3649",
+        tickcolor="#2e3649",
+        zerolinecolor="#2e3649",
+        tickfont=dict(color="#cbd5e1"),
+        title=dict(font=dict(color="#e8ecf4")),
+    ),
+    yaxis=dict(
+        gridcolor="#252b3a",
+        linecolor="#2e3649",
+        tickcolor="#2e3649",
+        zerolinecolor="#2e3649",
+        tickfont=dict(color="#cbd5e1"),
+        title=dict(font=dict(color="#e8ecf4")),
+    ),
+    legend=dict(
+        bgcolor="#13161d",
+        bordercolor="#252b3a",
+        borderwidth=1,
+        font=dict(size=11, color="#e8ecf4"),
+    ),
     colorway=PLOT_COLORWAY,
 )
 
 PLOT_LAYOUT_LIGHT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="DM Sans, sans-serif", color="#1e293b", size=12),  # was #64748b
-    xaxis=dict(gridcolor="#e2e8f0", linecolor="#94a3b8", tickcolor="#94a3b8",
-               zerolinecolor="#cbd5e1", tickfont=dict(color="#334155")),
-    yaxis=dict(gridcolor="#e2e8f0", linecolor="#94a3b8", tickcolor="#94a3b8",
-               zerolinecolor="#cbd5e1", tickfont=dict(color="#334155")),
-    legend=dict(bgcolor="rgba(255,255,255,0.96)", bordercolor="#cbd5e1",
-                borderwidth=1, font=dict(size=11, color="#1e293b")),  # was #64748b
+    paper_bgcolor="#ffffff",
+    plot_bgcolor="#f8fafc",
+    font=dict(family="DM Sans, sans-serif", color="#0f172a", size=12),
+    xaxis=dict(
+        gridcolor="#e2e8f0",
+        linecolor="#94a3b8",
+        tickcolor="#94a3b8",
+        zerolinecolor="#cbd5e1",
+        tickfont=dict(color="#334155"),
+        title=dict(font=dict(color="#0f172a")),
+    ),
+    yaxis=dict(
+        gridcolor="#e2e8f0",
+        linecolor="#94a3b8",
+        tickcolor="#94a3b8",
+        zerolinecolor="#cbd5e1",
+        tickfont=dict(color="#334155"),
+        title=dict(font=dict(color="#0f172a")),
+    ),
+    legend=dict(
+        bgcolor="#ffffff",
+        bordercolor="#e2e8f0",
+        borderwidth=1,
+        font=dict(size=11, color="#0f172a"),
+    ),
     colorway=PLOT_COLORWAY,
 )
 
@@ -231,16 +267,60 @@ def chart_theme_is_light() -> bool:
         return False
 
 
+if chart_theme_is_light():
+    st.markdown(
+        """
+<style>
+/* Light Streamlit theme: use a white app shell (base CSS used dark fallbacks). */
+.stApp {
+    background-color: #ffffff !important;
+    background-image: none !important;
+}
+[data-testid="stHeader"] {
+    background-color: rgba(255, 255, 255, 0.97) !important;
+    border-bottom: 1px solid #e2e8f0 !important;
+}
+[data-testid="stToolbar"] {
+    background-color: #ffffff !important;
+}
+[data-testid="stSidebar"] {
+    background-color: #f8fafc !important;
+    border-right-color: #e2e8f0 !important;
+}
+[data-testid="stSidebar"] .stTitle > * {
+    color: #2563eb !important;
+}
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stSelectbox label,
+[data-testid="stSidebar"] .stMultiSelect label,
+[data-testid="stSidebar"] .stDateInput label,
+[data-testid="stSidebar"] .stToggle label {
+    color: #64748b !important;
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
 def plotly_axis_lines():
+    """Axis line/tick styling merged into ``xaxis`` / ``yaxis`` updates (keeps contrast on PNG export)."""
     if chart_theme_is_light():
         return dict(
-            gridcolor="#e2e8f0", linecolor="#94a3b8",
-            tickcolor="#94a3b8", zerolinecolor="#cbd5e1",
+            gridcolor="#e2e8f0",
+            linecolor="#94a3b8",
+            tickcolor="#94a3b8",
+            zerolinecolor="#cbd5e1",
             tickfont=dict(color="#334155"),
+            title=dict(font=dict(color="#0f172a")),
         )
     return dict(
-        gridcolor="#1e2330", linecolor="#252b3a",
-        tickcolor="#252b3a", zerolinecolor="#252b3a",
+        gridcolor="#252b3a",
+        linecolor="#2e3649",
+        tickcolor="#2e3649",
+        zerolinecolor="#2e3649",
+        tickfont=dict(color="#cbd5e1"),
+        title=dict(font=dict(color="#e8ecf4")),
     )
 
 
@@ -558,6 +638,15 @@ with tab_overview:
     st.caption(
         "Mon–Sun calendar weeks · compares the partial current week (through yesterday) to the average "
         "of the four prior full weeks · ignores date filter · Center and other sidebar filters apply"
+    )
+    _wtd_asof = report_through_date()
+    _wtd_ws = monday_of_week_containing(_wtd_asof)
+    _wtd_first_prior_mon = _wtd_ws - timedelta(days=28)
+    _wtd_last_prior_sun = _wtd_ws - timedelta(days=1)
+    st.markdown(
+        f"**Week-to-date:** {_wtd_ws:%b %d, %Y} – {_wtd_asof:%b %d, %Y} · "
+        f"**vs 4-week average** (mean of the same KPI on each of four prior Mon–Sun weeks): "
+        f"calendar span **{_wtd_first_prior_mon:%b %d, %Y}** – **{_wtd_last_prior_sun:%b %d, %Y}**."
     )
 
     def _wk_raw(fn):
@@ -1000,7 +1089,7 @@ with tab_overview:
             yaxis_tickprefix=y_prefix,
             yaxis_ticksuffix=y_suffix,
             yaxis_title=y_title,
-            xaxis=dict(title="", tickangle=-22, automargin=True, **_ax_ov),
+            xaxis=dict(tickangle=-22, automargin=True, **_ax_ov),
             height=min(920, 320 + 48 * max(len(bar_df), 1)),
             margin=dict(l=50, r=28, t=56, b=120),
             showlegend=False,
@@ -1797,12 +1886,13 @@ with tab_lift:
         )
 
         if lift_view in ("Post Δ (Arc/Atom−1)", "Swing (Post Δ − Pre Δ)"):
+            _hcol = "#64748b" if chart_theme_is_light() else "#4d5669"
             fig_lift.add_hline(
                 y=0,
                 line_dash="dash",
-                line_color="#4d5669",
+                line_color=_hcol,
                 annotation_text="0",
-                annotation_font_color="#4d5669",
+                annotation_font_color=_hcol,
             )
 
         st.plotly_chart(fig_lift, use_container_width=True)
