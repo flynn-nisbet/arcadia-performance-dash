@@ -26,6 +26,9 @@ st.set_page_config(
 )
 
 import theme
+
+theme.restore_theme_from_query_params()
+
 from charts import (
     PLOT_COLORWAY,
     apply_chart_theme,
