@@ -490,7 +490,7 @@ with tab_overview:
     def wk_pct_delta_vs_avg(cur, baseline):
         if cur is None or baseline is None or pd.isna(cur) or pd.isna(baseline) or baseline == 0:
             return None
-        return f"{(cur / baseline - 1) * 100:+.1f}% vs P4WA (pooled)"
+        return f"{(cur / baseline - 1) * 100:+.1f}% vs P4WA"
 
     def wtd_display_val(fn):
         cur, _ = _wk_raw(fn)
