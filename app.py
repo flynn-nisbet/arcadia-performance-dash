@@ -446,6 +446,30 @@ def fmt_funnel_delta(v1, v2, fmt):
     return f"{v2 - v1:+.2f}"
 
 
+def mix_shift_decomposition(w1_frac: np.ndarray, w2_frac: np.ndarray, r1: np.ndarray, r2: np.ndarray) -> dict:
+    """Blended = Σ w·r; total change = mix + rate + interaction (same units as r)."""
+    w1 = np.asarray(w1_frac, dtype=float)
+    w2 = np.asarray(w2_frac, dtype=float)
+    r1 = np.nan_to_num(np.asarray(r1, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    r2 = np.nan_to_num(np.asarray(r2, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    b1 = float(np.dot(w1, r1))
+    b2 = float(np.dot(w2, r2))
+    mix_e = (w2 - w1) * r1
+    rate_e = w1 * (r2 - r1)
+    inter_e = (w2 - w1) * (r2 - r1)
+    return {
+        "blend1": b1,
+        "blend2": b2,
+        "total_change": b2 - b1,
+        "mix_e": mix_e,
+        "rate_e": rate_e,
+        "inter_e": inter_e,
+        "sum_mix": float(np.sum(mix_e)),
+        "sum_rate": float(np.sum(rate_e)),
+        "sum_inter": float(np.sum(inter_e)),
+    }
+
+
 # ── Header ─────────────────────────────────────────────────────────────────────
 date_str = ""
 if df["call_date_est"].notna().any():
@@ -1022,10 +1046,10 @@ with tab_volume:
         st.divider()
         st.subheader("Custom Period Mix Comparison")
         st.caption(
-            "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
-            "Each period is **% of inbound calls** in each category (top-N + Other), plus P2 vs P1 change. "
-            "**Performance Metric** uses the same definitions as the Overview funnel, computed **within each mix category** "
-            "(all calls in that bucket for the period)."
+            "Ignores the sidebar **Date Range**; uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
+            "Table: inbound **call mix** by category (top-N + Other) vs **Performance metric** per bucket. "
+            "**Mix / rate / interaction / total impact** columns decompose **P2 − P1** in the selected metric using "
+            "call-mix weights × bucket rates (percentage metrics in **ppt**). The four impacts **sum** to total change per row and overall."
         )
 
         if "call_date_est" not in vol_cmp_base.columns or len(vol_cmp_base) == 0:
@@ -1122,21 +1146,8 @@ with tab_volume:
                 t2 = float(n2a.sum()) or 1.0
                 p1 = (n1a / t1 * 100.0).rename("p1")
                 p2 = (n2a / t2 * 100.0).rename("p2")
-                dfb = pd.DataFrame({"Category": union_ix, col1: p1.values, col2: p2.values})
-                dfb["Δ (P2 − P1, ppt)"] = dfb[col2] - dfb[col1]
-                dfb["% Change (P2 vs P1)"] = dfb.apply(
-                    lambda r: "—"
-                    if r[col1] == 0
-                    else f"{(r[col2] / r[col1] - 1) * 100:+.1f}%",
-                    axis=1,
-                )
-                _mix_chg = "% Change (P2 vs P1)"
 
                 _m_fmt = FUNNEL_METRIC_FMT[vol_cmp_metric]
-                _m_p1 = f"{vol_cmp_metric} (P1)"
-                _m_p2 = f"{vol_cmp_metric} (P2)"
-                _m_d = f"{vol_cmp_metric} (Δ)"
-                _m_pch = f"{vol_cmp_metric} (% Change (P2 vs P1))"
 
                 g1_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_1)
                 g2_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_2)
@@ -1158,34 +1169,140 @@ with tab_volume:
                     _raw_m1.append(compute_funnel_row(s1, vol_cmp_metric))
                     _raw_m2.append(compute_funnel_row(s2, vol_cmp_metric))
 
-                dfb[_m_p1] = [fmt_funnel(a, _m_fmt) for a in _raw_m1]
-                dfb[_m_p2] = [fmt_funnel(b, _m_fmt) for b in _raw_m2]
-                dfb[_m_d] = [fmt_funnel_delta(a, b, _m_fmt) for a, b in zip(_raw_m1, _raw_m2)]
-                dfb[_m_pch] = [fmt_pct_change_str(pct_change_vs_prior(a, b)) for a, b in zip(_raw_m1, _raw_m2)]
+                w1f = (p1.values / 100.0).astype(float)
+                w2f = (p2.values / 100.0).astype(float)
+                r1a = np.array(
+                    [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else 0.0 for x in _raw_m1],
+                    dtype=float,
+                )
+                r2a = np.array(
+                    [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else 0.0 for x in _raw_m2],
+                    dtype=float,
+                )
+                dec = mix_shift_decomposition(w1f, w2f, r1a, r2a)
+                _ppt = 100.0 if _m_fmt == "pct" else 1.0
+                tot_ch = dec["total_change"]
 
-                def _style_vol_cmp_row(row):
+                def _fmt_delta_card(v: float) -> str:
+                    if _m_fmt == "pct":
+                        return f"{v * _ppt:+.1f} ppt"
+                    if _m_fmt == "count":
+                        return f"{v:+,.1f}"
+                    if _m_fmt == "dollar":
+                        return f"${v:+,.2f}"
+                    return f"{v:+.2f}"
+
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Mix effect", _fmt_delta_card(dec["sum_mix"]))
+                with k2:
+                    st.metric("Rate effect", _fmt_delta_card(dec["sum_rate"]))
+                with k3:
+                    st.metric("Interaction effect", _fmt_delta_card(dec["sum_inter"]))
+                with k4:
+                    st.metric("Total change", _fmt_delta_card(tot_ch))
+
+                _c_met1 = "Metric P1"
+                _c_met2 = "Metric P2"
+
+                def _metric_cell_display(rv: float) -> float:
+                    if _m_fmt == "pct":
+                        return round(float(rv) * _ppt, 1)
+                    return round(float(rv), 1)
+
+                cmp_rows = []
+                for i, cat in enumerate(union_ix):
+                    p1v = float(p1.iloc[i])
+                    p2v = float(p2.iloc[i])
+                    r1v, r2v = float(r1a[i]), float(r2a[i])
+                    mix_pct_ch = (p2v / p1v - 1.0) * 100.0 if p1v > 0 else float("nan")
+                    met_ch = pct_change_vs_prior(r1v, r2v)
+                    mi = float(dec["mix_e"][i]) * _ppt
+                    ri = float(dec["rate_e"][i]) * _ppt
+                    ii = float(dec["inter_e"][i]) * _ppt
+                    ti = mi + ri + ii
+                    mix_ch_s = "—" if p1v <= 0 or (isinstance(mix_pct_ch, float) and pd.isna(mix_pct_ch)) else f"{mix_pct_ch:+.1f}%"
+                    met_ch_s = fmt_pct_change_str(met_ch)
+                    cmp_rows.append(
+                        {
+                            "Category": cat,
+                            "Mix P1": round(p1v, 1),
+                            "Mix P2": round(p2v, 1),
+                            "Percent change (mix)": mix_ch_s,
+                            _c_met1: _metric_cell_display(r1v),
+                            _c_met2: _metric_cell_display(r2v),
+                            "Percent change (metric)": met_ch_s,
+                            "Mix impact": round(mi, 1),
+                            "Rate impact": round(ri, 1),
+                            "Interaction impact": round(ii, 1),
+                            "Total impact": round(ti, 1),
+                        }
+                    )
+
+                _b1 = float(dec["blend1"])
+                _b2 = float(dec["blend2"])
+                _tot_mix_p1 = round(float(np.sum(w1f) * 100.0), 1)
+                _tot_mix_p2 = round(float(np.sum(w2f) * 100.0), 1)
+                _tot_mix_pct_ch = (
+                    (_tot_mix_p2 / _tot_mix_p1 - 1.0) * 100.0 if _tot_mix_p1 > 0 else float("nan")
+                )
+                _tot_mix_ch_s = (
+                    "—"
+                    if _tot_mix_p1 <= 0 or (isinstance(_tot_mix_pct_ch, float) and pd.isna(_tot_mix_pct_ch))
+                    else f"{_tot_mix_pct_ch:+.1f}%"
+                )
+                _tot_met_ch = pct_change_vs_prior(_b1, _b2)
+                total_row = {
+                    "Category": "Total",
+                    "Mix P1": _tot_mix_p1,
+                    "Mix P2": _tot_mix_p2,
+                    "Percent change (mix)": _tot_mix_ch_s,
+                    _c_met1: _metric_cell_display(_b1),
+                    _c_met2: _metric_cell_display(_b2),
+                    "Percent change (metric)": fmt_pct_change_str(_tot_met_ch),
+                    "Mix impact": round(float(dec["sum_mix"]) * _ppt, 1),
+                    "Rate impact": round(float(dec["sum_rate"]) * _ppt, 1),
+                    "Interaction impact": round(float(dec["sum_inter"]) * _ppt, 1),
+                    "Total impact": round(float(tot_ch) * _ppt, 1),
+                }
+                cmp_df = pd.DataFrame(cmp_rows + [total_row])
+                _impact_cols = ["Mix impact", "Rate impact", "Interaction impact", "Total impact"]
+                _pch_mix = "Percent change (mix)"
+                _pch_met = "Percent change (metric)"
+
+                def _style_vol_mix_cmp_row(row):
+                    """Match Overview custom period table: :func:`theme.pct_change_cell_style`."""
                     out = pd.Series("", index=row.index)
-                    p_mix = parse_display_pct(row[_mix_chg])
-                    if p_mix is not None:
-                        out[_mix_chg] = theme.pct_change_cell_style("mix_share_pct", p_mix)
-                    p_met = parse_display_pct(row[_m_pch])
-                    if p_met is not None:
-                        out[_m_pch] = theme.pct_change_cell_style(vol_cmp_metric, p_met)
+                    pm = parse_display_pct(row.get(_pch_mix))
+                    if pm is not None:
+                        out[_pch_mix] = theme.pct_change_cell_style("mix_share_pct", pm)
+                    pr = parse_display_pct(row.get(_pch_met))
+                    if pr is not None:
+                        out[_pch_met] = theme.pct_change_cell_style(vol_cmp_metric, pr)
+                    for _ic in _impact_cols:
+                        v = row.get(_ic)
+                        try:
+                            x = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if isinstance(x, float) and (pd.isna(x) or np.isinf(x)):
+                            continue
+                        out[_ic] = theme.pct_change_cell_style(vol_cmp_metric, x)
                     return out
 
+                _fmt_cols = {c: "{:.1f}" for c in ["Mix P1", "Mix P2", _c_met1, _c_met2] + _impact_cols}
+                _sty_cmp = cmp_df.style.apply(_style_vol_mix_cmp_row, axis=1).format(_fmt_cols, na_rep="—")
+
                 st.dataframe(
-                    dfb.style.apply(_style_vol_cmp_row, axis=1).format(
-                        {col1: "{:.2f}%", col2: "{:.2f}%", "Δ (P2 − P1, ppt)": "{:+.2f}"},
-                        na_rep="—",
-                    ),
+                    _sty_cmp,
                     use_container_width=True,
                     hide_index=True,
-                    height=dataframe_display_height(len(dfb)),
+                    height=dataframe_display_height(len(cmp_df)),
                 )
-                table_export_row(dfb, "volume_mix_period_comparison.csv")
+                table_export_row(cmp_df, "volume_mix_period_comparison.csv")
 
-                pa = dfb.set_index("Category")[col1]
-                pb = dfb.set_index("Category")[col2]
+                pa = p1
+                pb = p2
                 _n_cat = len(union_ix)
                 _vol_cmp_layout = volume_comparison_bars_layout(_n_cat)
                 fig_cmp = go.Figure()
@@ -1260,6 +1377,74 @@ with tab_volume:
                     **_vol_cmp_layout,
                 )
                 st.plotly_chart(fig_m_cmp, use_container_width=True)
+
+                _eff_unit = "ppt" if _m_fmt == "pct" else str(_m_fmt)
+                _y_title = f"Effect ({_eff_unit})"
+                _per_tot = (dec["mix_e"] + dec["rate_e"] + dec["inter_e"]) * _ppt
+                _x_dec = list(union_ix) + ["Total"]
+                _n_x = len(_x_dec)
+                _vol_dec_layout = volume_comparison_bars_layout(_n_x)
+                _ym = np.concatenate([dec["mix_e"] * _ppt, [dec["sum_mix"] * _ppt]])
+                _yr = np.concatenate([dec["rate_e"] * _ppt, [dec["sum_rate"] * _ppt]])
+                _yi = np.concatenate([dec["inter_e"] * _ppt, [dec["sum_inter"] * _ppt]])
+                _yt = np.concatenate([_per_tot, [float(tot_ch) * _ppt]])
+                _c_mix = "#22d3c8"
+                _c_rate = "#3d8ef8"
+                _c_int = "#94a3b8" if theme.is_light_theme() else "#64748b"
+                _c_tot = "#a78bfa"
+                fig_dec = go.Figure()
+                fig_dec.add_trace(
+                    go.Bar(
+                        name="Mix impact",
+                        x=_x_dec,
+                        y=_ym,
+                        marker_color=_c_mix,
+                        hovertemplate="%{x}<br>mix %{y:.1f}<extra></extra>",
+                    )
+                )
+                fig_dec.add_trace(
+                    go.Bar(
+                        name="Rate impact",
+                        x=_x_dec,
+                        y=_yr,
+                        marker_color=_c_rate,
+                        hovertemplate="%{x}<br>rate %{y:.1f}<extra></extra>",
+                    )
+                )
+                fig_dec.add_trace(
+                    go.Bar(
+                        name="Interaction impact",
+                        x=_x_dec,
+                        y=_yi,
+                        marker_color=_c_int,
+                        hovertemplate="%{x}<br>interaction %{y:.1f}<extra></extra>",
+                    )
+                )
+                fig_dec.add_trace(
+                    go.Bar(
+                        name="Total impact",
+                        x=_x_dec,
+                        y=_yt,
+                        marker_color=_c_tot,
+                        hovertemplate="%{x}<br>total %{y:.1f}<extra></extra>",
+                    )
+                )
+                _dec_title = f"{vol_cmp_metric} change decomposition: mix vs. rate effects"
+                apply_chart_theme(
+                    fig_dec,
+                    title=layout_chart_title(_dec_title),
+                    barmode="group",
+                    xaxis=plotly_axis_extra(vol_dim_label, tickangle=-28, automargin=True),
+                    yaxis=plotly_axis_extra(_y_title, tickformat=".1f"),
+                    **_vol_dec_layout,
+                )
+                fig_dec.add_hline(
+                    y=0,
+                    line_dash="dash",
+                    line_color=chart_hline_reference(),
+                    layer="below",
+                )
+                st.plotly_chart(fig_dec, use_container_width=True)
             else:
                 st.info("Select a full start and end date for each period.")
 
