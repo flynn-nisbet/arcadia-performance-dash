@@ -27,16 +27,23 @@ st.set_page_config(
 
 import theme
 
-theme.restore_theme_from_query_params()
-theme.restore_cmp_dates_from_query_params()
+theme.init_browser_query_state()
 
 from charts import (
     PLOT_COLORWAY,
     apply_chart_theme,
-    chart_theme_is_light,
+    chart_hist_stroke_and_title,
+    chart_hline_reference,
+    chart_muted,
+    chart_text_primary,
+    colorway_cycled,
+    funnel_metric_bar_hover_and_ticks,
+    layout_chart_title,
     lift_chart_title,
     overview_chart_title,
+    plotly_axis_extra,
     plotly_axis_lines,
+    volume_comparison_bars_layout,
 )
 
 
@@ -190,7 +197,8 @@ PERIOD_FMT     = {"Daily": "%b %d", "Weekly": "%b %d", "Monthly": "%b %Y"}
 
 def period_labels(date_series, period):
     code = PERIOD_CODE[period]
-    return date_series.dt.to_period(code).apply(lambda p: p.start_time)
+    pr = pd.DatetimeIndex(date_series).to_period(code)
+    return pd.Series(pr.to_timestamp(how="start"), index=date_series.index)
 
 def period_display(label_series, period):
     return pd.to_datetime(label_series).dt.strftime(PERIOD_FMT[period])
@@ -219,30 +227,26 @@ def top_funnel_call_count(d: pd.DataFrame) -> int:
     return int(top_funnel_mask(d).sum())
 
 
-# Funnel / overview metric names where a *decrease* (P2 vs P1, or vs prior week) is better
-FUNNEL_METRIC_LOWER_IS_BETTER = frozenset({"Talk Time", "Sold Talk Time", "Unsold Talk Time"})
-# Lift tab KPI keys (same semantics for Arcadia vs Atom deltas)
-LIFT_KPI_LOWER_IS_BETTER = frozenset({"tt"})
+def cmp_date_range_sort(pair):
+    if pair is None or len(pair) != 2:
+        return None
+    a, b = pair[0], pair[1]
+    return (a, b) if a <= b else (b, a)
 
 
-def pct_change_cell_style(metric_id: str, pct_num: float, neutral_abs: float = 1.5) -> str:
-    """CSS for a numeric % change. metric_id = funnel 'Metric' name or lift KPI key (e.g. 'tt')."""
-    if pct_num is None or (isinstance(pct_num, float) and (pd.isna(pct_num) or np.isinf(pct_num))):
-        return ""
-    light = theme.is_light_theme()
-    if abs(float(pct_num)) < neutral_abs:
-        if light:
-            return "background-color: #fef9c3; color: #854d0e"
-        return "background-color: #2a2a1a; color: #c8a000"
-    lower_better = metric_id in FUNNEL_METRIC_LOWER_IS_BETTER or metric_id in LIFT_KPI_LOWER_IS_BETTER
-    good = (float(pct_num) < 0) if lower_better else (float(pct_num) > 0)
-    if good:
-        if light:
-            return "background-color: #dcfce7; color: #166534"
-        return "background-color: #0f2a1a; color: #22c55e"
-    if light:
-        return "background-color: #ffe4e6; color: #be123c"
-    return "background-color: #2a1018; color: #f43f5e"
+def cmp_date_range_clamp(lo, hi, pair, fallback):
+    fb = cmp_date_range_sort(fallback)
+    if fb is None:
+        fb = (lo, min(hi, lo + timedelta(days=6)))
+    sp = cmp_date_range_sort(pair)
+    if sp is None:
+        return fb
+    a, b = sp
+    a = max(lo, min(hi, a))
+    b = max(lo, min(hi, b))
+    if a > b:
+        return fb
+    return (a, b)
 
 
 def parse_display_pct(val):
@@ -254,6 +258,7 @@ def parse_display_pct(val):
         return float(s)
     except ValueError:
         return None
+
 
 def wtd_vs_four_week_pooled(source, metric_fn):
     """Partial Mon–Sun week through ``report_through_date()`` vs P4WA on one pooled window.
@@ -320,6 +325,127 @@ def compute_kpis(d):
         "talk_time_unsold": tt_unsold,
     }
 
+
+# Funnel metrics (shared: Overview funnel table / period comparison + Volume shifts bucket comparison)
+FUNNEL_METRICS = [
+    ("Calls", "count"),
+    ("CiContact", "pct"),
+    ("CiCredit", "pct"),
+    ("PCR", "pct"),
+    ("PCC", "pct"),
+    ("FCC", "pct"),
+    ("NC", "pct"),
+    ("TPM", "pct"),
+    ("Revenue", "dollar"),
+    ("RPNC", "dollar"),
+    ("RPO", "dollar"),
+    ("Talk Time", "decimal"),
+    ("Sold Talk Time", "decimal"),
+    ("Unsold Talk Time", "decimal"),
+]
+FUNNEL_METRIC_FMT = dict(FUNNEL_METRICS)
+
+
+def compute_funnel_row(grp, metric):
+    inbound = grp[top_funnel_mask(grp)]
+    orders_rev_rows = grp[order_revenue_mask(grp)]
+    n = top_funnel_call_count(grp)
+    n_contact = inbound["ib_contact_calls"].sum() if "ib_contact_calls" in inbound.columns else 0
+    n_credit = inbound["credit_calls_flag"].sum() if "credit_calls_flag" in inbound.columns else 0
+    n_pass_cr = inbound["passed_credit_call_flag"].sum() if "passed_credit_call_flag" in inbound.columns else 0
+    n_fail_cr = inbound["failed_credit_call_flag"].sum() if "failed_credit_call_flag" in inbound.columns else 0
+    n_pass_sale = inbound["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in inbound.columns else 0
+    n_fail_sale = inbound["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in inbound.columns else 0
+    n_orders = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
+    n_tpsales = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
+    rev = (
+        orders_rev_rows["total_revenue"].sum()
+        if "total_revenue" in orders_rev_rows.columns
+        else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
+    )
+    tt_all = inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
+    tt_sold = (
+        inbound[inbound["orders"] > 0]["talk_time_minutes"].mean()
+        if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns)
+        else float("nan")
+    )
+    tt_unsold = (
+        inbound[inbound["orders"] == 0]["talk_time_minutes"].mean()
+        if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns)
+        else float("nan")
+    )
+
+    val_map = {
+        "Calls": n,
+        "CiContact": safe_rate(n_contact, n),
+        "CiCredit": safe_rate(n_credit, n),
+        "PCR": safe_rate(n_pass_cr, n_credit),
+        "PCC": safe_rate(n_pass_sale, n_pass_cr),
+        "FCC": safe_rate(n_fail_sale, n_fail_cr),
+        "NC": safe_rate(n_orders, n),
+        "TPM": safe_rate(n_tpsales, n_orders),
+        "Revenue": rev,
+        "RPNC": safe_rate(rev, n),
+        "RPO": safe_rate(rev, n_orders),
+        "Talk Time": tt_all,
+        "Sold Talk Time": tt_sold,
+        "Unsold Talk Time": tt_unsold,
+    }
+    return val_map.get(metric, float("nan"))
+
+
+def fmt_funnel(val, fmt):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "—"
+    if fmt == "count":
+        return f"{int(val):,}"
+    if fmt == "pct":
+        return f"{val:.1%}"
+    if fmt == "dollar":
+        return f"${val:,.2f}"
+    return f"{val:.2f}"
+
+
+def pct_change_vs_prior(v1, v2):
+    if v1 is None or v2 is None:
+        return float("nan")
+    if (isinstance(v1, float) and pd.isna(v1)) or (isinstance(v2, float) and pd.isna(v2)):
+        return float("nan")
+    try:
+        v1 = float(v1)
+        v2 = float(v2)
+    except (TypeError, ValueError):
+        return float("nan")
+    if v1 == 0:
+        return float("nan")
+    return (v2 / v1 - 1.0) * 100.0
+
+
+def fmt_pct_change_str(p):
+    if p is None or (isinstance(p, float) and pd.isna(p)):
+        return "—"
+    return f"{p:+.1f}%"
+
+
+def fmt_funnel_delta(v1, v2, fmt):
+    if v1 is None or v2 is None:
+        return "—"
+    if (isinstance(v1, float) and pd.isna(v1)) or (isinstance(v2, float) and pd.isna(v2)):
+        return "—"
+    try:
+        v1 = float(v1)
+        v2 = float(v2)
+    except (TypeError, ValueError):
+        return "—"
+    if fmt == "pct":
+        return f"{(v2 - v1) * 100:+.2f} ppt"
+    if fmt == "count":
+        return f"{int(round(v2)) - int(round(v1)):+,}"
+    if fmt == "dollar":
+        return f"${v2 - v1:+,.2f}"
+    return f"{v2 - v1:+.2f}"
+
+
 # ── Header ─────────────────────────────────────────────────────────────────────
 date_str = ""
 if df["call_date_est"].notna().any():
@@ -331,8 +457,9 @@ st.title("⚡ Arcadia Performance Dash")
 st.caption(f"{date_str}  ·  {top_funnel_call_count(df):,} inbound calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_overview, tab_agent, tab_lift = st.tabs([
+tab_overview, tab_volume, tab_agent, tab_lift = st.tabs([
     "Overview",
+    "Volume Shifts",
     "Agent Level",
     "Arcadia vs Atom",
 ])
@@ -402,66 +529,6 @@ with tab_overview:
         "Granularity", PERIOD_OPTIONS, index=0, horizontal=True, key="overview_gran"
     )
 
-    FUNNEL_METRICS = [
-        ("Calls",          "count"),
-        ("CiContact",      "pct"),
-        ("CiCredit",       "pct"),
-        ("PCR",            "pct"),
-        ("PCC",            "pct"),
-        ("FCC",            "pct"),
-        ("NC",             "pct"),
-        ("TPM",            "pct"),
-        ("Revenue",        "dollar"),
-        ("RPNC",           "dollar"),
-        ("RPO",            "dollar"),
-        ("Talk Time",      "decimal"),
-        ("Sold Talk Time", "decimal"),
-        ("Unsold Talk Time","decimal"),
-    ]
-
-    def compute_funnel_row(grp, metric):
-        inbound = grp[top_funnel_mask(grp)]
-        orders_rev_rows = grp[order_revenue_mask(grp)]
-        n          = top_funnel_call_count(grp)
-        n_contact  = inbound["ib_contact_calls"].sum()  if "ib_contact_calls"       in inbound.columns else 0
-        n_credit   = inbound["credit_calls_flag"].sum() if "credit_calls_flag"       in inbound.columns else 0
-        n_pass_cr  = inbound["passed_credit_call_flag"].sum() if "passed_credit_call_flag" in inbound.columns else 0
-        n_fail_cr  = inbound["failed_credit_call_flag"].sum() if "failed_credit_call_flag" in inbound.columns else 0
-        n_pass_sale= inbound["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in inbound.columns else 0
-        n_fail_sale= inbound["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in inbound.columns else 0
-        n_orders   = orders_rev_rows["orders"].sum()            if "orders"                  in orders_rev_rows.columns else 0
-        n_tpsales  = orders_rev_rows["tpsales_flag"].sum()      if "tpsales_flag"            in orders_rev_rows.columns else 0
-        rev        = orders_rev_rows["total_revenue"].sum()     if "total_revenue"           in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
-        tt_all     = inbound["talk_time_minutes"].mean()    if "talk_time_minutes"   in inbound.columns else float("nan")
-        tt_sold    = inbound[inbound["orders"] > 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
-        tt_unsold  = inbound[inbound["orders"] == 0]["talk_time_minutes"].mean() if ("talk_time_minutes" in inbound.columns and "orders" in inbound.columns) else float("nan")
-
-        val_map = {
-            "Calls":           n,
-            "CiContact":       safe_rate(n_contact,   n),
-            "CiCredit":        safe_rate(n_credit,    n),
-            "PCR":             safe_rate(n_pass_cr,   n_credit),
-            "PCC":             safe_rate(n_pass_sale, n_pass_cr),
-            "FCC":             safe_rate(n_fail_sale, n_fail_cr),
-            "NC":              safe_rate(n_orders,    n),
-            "TPM":             safe_rate(n_tpsales,   n_orders),
-            "Revenue":         rev,
-            "RPNC":            safe_rate(rev,         n),
-            "RPO":             safe_rate(rev,         n_orders),
-            "Talk Time":       tt_all,
-            "Sold Talk Time":  tt_sold,
-            "Unsold Talk Time":tt_unsold,
-        }
-        return val_map.get(metric, float("nan"))
-
-    def fmt_funnel(val, fmt):
-        if val is None or (isinstance(val, float) and pd.isna(val)):
-            return "—"
-        if fmt == "count":   return f"{int(val):,}"
-        if fmt == "pct":     return f"{val:.1%}"
-        if fmt == "dollar":  return f"${val:,.2f}"
-        return f"{val:.2f}"
-
     if "call_date_est" in df.columns and len(df) > 0:
         ft_df = df.dropna(subset=["call_date_est"]).copy()
         ft_df["period"] = period_labels(ft_df["call_date_est"], ov_gran)
@@ -513,26 +580,6 @@ with tab_overview:
 
         _OCK1, _OCK2 = "ov_cmp_period1", "ov_cmp_period2"
 
-        def _cmp_sort_pair(p):
-            if p is None or len(p) != 2:
-                return None
-            a, b = p[0], p[1]
-            return (a, b) if a <= b else (b, a)
-
-        def _clamp_cmp_pair(lo, hi, pair, fallback):
-            fb = _cmp_sort_pair(fallback)
-            if fb is None:
-                fb = (lo, min(hi, lo + timedelta(days=6)))
-            sp = _cmp_sort_pair(pair)
-            if sp is None:
-                return fb
-            a, b = sp
-            a = max(lo, min(hi, a))
-            b = max(lo, min(hi, b))
-            if a > b:
-                return fb
-            return (a, b)
-
         if _OCK1 not in st.session_state:
             st.session_state[_OCK1] = (_d1_start, _d1_end)
         if _OCK2 not in st.session_state:
@@ -540,12 +587,12 @@ with tab_overview:
         # Only clamp complete ranges — range pickers briefly hold 0–1 dates; clamping would reset to defaults.
         _rv1 = st.session_state.get(_OCK1)
         if isinstance(_rv1, (tuple, list)) and len(_rv1) == 2:
-            st.session_state[_OCK1] = _clamp_cmp_pair(
+            st.session_state[_OCK1] = cmp_date_range_clamp(
                 _cmp_min, _cmp_cap, tuple(_rv1), (_d1_start, _d1_end)
             )
         _rv2 = st.session_state.get(_OCK2)
         if isinstance(_rv2, (tuple, list)) and len(_rv2) == 2:
-            st.session_state[_OCK2] = _clamp_cmp_pair(
+            st.session_state[_OCK2] = cmp_date_range_clamp(
                 _cmp_min, _cmp_cap, tuple(_rv2), (_d2_start, _d2_end)
             )
 
@@ -576,25 +623,6 @@ with tab_overview:
             m = (d_all["call_date_est"].dt.date >= a) & (d_all["call_date_est"].dt.date <= b)
             return d_all.loc[m]
 
-        def _pct_change_numeric(v1, v2):
-            if v1 is None or v2 is None:
-                return float("nan")
-            if (isinstance(v1, float) and pd.isna(v1)) or (isinstance(v2, float) and pd.isna(v2)):
-                return float("nan")
-            try:
-                v1 = float(v1)
-                v2 = float(v2)
-            except (TypeError, ValueError):
-                return float("nan")
-            if v1 == 0:
-                return float("nan")
-            return (v2 / v1 - 1.0) * 100.0
-
-        def _fmt_pct_change(p):
-            if p is None or (isinstance(p, float) and pd.isna(p)):
-                return "—"
-            return f"{p:+.1f}%"
-
         if len(cmp_range_1) == 2 and len(cmp_range_2) == 2:
             g1 = _slice_period(df_cmp, cmp_range_1)
             g2 = _slice_period(df_cmp, cmp_range_2)
@@ -609,13 +637,13 @@ with tab_overview:
                 raw2 = compute_funnel_row(g2, metric)
                 disp1 = fmt_funnel(raw1, fmt)
                 disp2 = fmt_funnel(raw2, fmt)
-                pch = _pct_change_numeric(raw1, raw2)
+                pch = pct_change_vs_prior(raw1, raw2)
                 cmp_rows.append(
                     {
                         "Metric": metric,
                         col1: disp1,
                         col2: disp2,
-                        "% Change (P2 vs P1)": _fmt_pct_change(pch),
+                        "% Change (P2 vs P1)": fmt_pct_change_str(pch),
                     }
                 )
             cmp_table = pd.DataFrame(cmp_rows)
@@ -626,7 +654,7 @@ with tab_overview:
                 p = parse_display_pct(row[_pch_col])
                 out = pd.Series("", index=row.index)
                 if p is not None:
-                    out[_pch_col] = pct_change_cell_style(m, p)
+                    out[_pch_col] = theme.pct_change_cell_style(m, p)
                 return out
 
             cmp_styler = cmp_table.style.apply(_style_cmp_row, axis=1)
@@ -733,7 +761,7 @@ with tab_overview:
 
         fig_ov_trend = go.Figure()
         _ax_ov = plotly_axis_lines()
-        _muted = "#475569" if chart_theme_is_light() else "#8b95aa"
+        _muted = chart_muted()
 
         if ov_group_col and ov_group_col in ov_ts_df.columns:
             for group_val, grp_c in ov_ts_df.groupby(ov_group_col):
@@ -770,11 +798,10 @@ with tab_overview:
         else:
             y_fmt, y_prefix, y_suffix, y_title = ",.0f", "", "", ov_metric_choice
 
-        _tcol = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
         _trend_title = overview_chart_title(ov_metric_choice, ov_group_choice)
         apply_chart_theme(
             fig_ov_trend,
-            title=dict(text=_trend_title, x=0.02, xanchor="left", font=dict(size=16, color=_tcol)),
+            title=layout_chart_title(_trend_title),
             yaxis_tickformat=y_fmt,
             yaxis_tickprefix=y_prefix,
             yaxis_ticksuffix=y_suffix,
@@ -811,25 +838,23 @@ with tab_overview:
         else:
             bar_df = pd.DataFrame([{"Category": "Overall", "Value": agg_metric_ov(ov_ts_df)}])
 
-        _bar_colors = (PLOT_COLORWAY * (1 + len(bar_df) // max(len(PLOT_COLORWAY), 1)))[: max(len(bar_df), 1)]
-        _tcol2 = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
-        _mline = "#cbd5e1" if chart_theme_is_light() else "#252b3a"
+        _mline, _tbar = chart_hist_stroke_and_title()
         fig_ov_bar = go.Figure(
             go.Bar(
                 x=bar_df["Category"],
                 y=bar_df["Value"],
-                marker_color=_bar_colors,
+                marker_color=colorway_cycled(len(bar_df)),
                 opacity=0.92,
                 marker_line_color=_mline,
                 marker_line_width=1,
                 text=[_fmt_bar_val(v) for v in bar_df["Value"]],
                 textposition="outside",
-                textfont=dict(size=11, color=_tcol2),
+                textfont=dict(size=11, color=_tbar),
             )
         )
         apply_chart_theme(
             fig_ov_bar,
-            title=dict(text=_snap_title, x=0.02, xanchor="left", font=dict(size=16, color=_tcol2)),
+            title=layout_chart_title(_snap_title),
             yaxis_tickformat=y_fmt,
             yaxis_tickprefix=y_prefix,
             yaxis_ticksuffix=y_suffix,
@@ -844,11 +869,406 @@ with tab_overview:
         st.info("No data available for trend chart.")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB — VOLUME SHIFTS (SECOND TAB): INBOUND MIX + CUSTOM-PERIOD MIX / METRIC BY BUCKET
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_volume:
+    st.subheader("Mix Shifts")
+    st.caption(
+        "**Trend line chart** uses the sidebar **Date Range** plus Center, Marketing, Mover/Switcher, Tenure, and Site/SERP. "
+        "Choose a **funnel step** to plot that step’s **mix** across the selected dimension (shares sum to 100% within each period). "
+        "**Custom period mix** below ignores the sidebar date range "
+        "(same rule as Overview → Custom Period Comparison) and compares **mix %** for Period 1 vs Period 2."
+    )
+
+    VOL_DIM_CHOICES = {
+        "Center": "center_location",
+        "Marketing Bucket": "marketing_bucket",
+        "Mover / Switcher": "moverSwitcher",
+        "Tenure Bucket": "tenure_bucket",
+        "Site/SERP": "call_type",
+    }
+    # Funnel-step mix for the trend line chart (denominator = period total of that step).
+    VOL_MIX_STEP_CHOICES = {
+        "Net Calls": "calls",
+        "CiContact": "ci_contact",
+        "CiCredit": "ci_credit",
+        "Sales": "sales",
+    }
+    VOL_MIX_STEP_YAXIS = {
+        "calls": "Share of inbound calls (%)",
+        "ci_contact": "Share of contact events (%)",
+        "ci_credit": "Share of credit events (%)",
+        "sales": "Share of orders (%)",
+    }
+
+    def _vol_inbound_frame(base: pd.DataFrame) -> pd.DataFrame:
+        if base is None or base.empty or "call_date_est" not in base.columns:
+            return base.iloc[0:0].copy()
+        out = base.dropna(subset=["call_date_est"]).copy()
+        return out.loc[top_funnel_mask(out)].copy()
+
+    def _vol_topn_labels(s: pd.Series, top_n: int) -> pd.Series:
+        s = s.fillna("(missing)").astype(str)
+        if top_n <= 0:
+            return s
+        keep = set(s.value_counts().nlargest(top_n).index)
+        return s.where(s.isin(keep), "Other")
+
+    def _vol_funnel_step_mix_pivot(
+        v_in: pd.DataFrame, gran: str, dim_col: str, top_n: int, step: str
+    ) -> pd.DataFrame:
+        """Wide volumes per period × category for ``step``; convert to mix % with row-wise totals."""
+        if v_in.empty or dim_col not in v_in.columns:
+            return pd.DataFrame()
+        w = v_in.copy()
+        w["period"] = period_labels(w["call_date_est"], gran)
+        w["_lbl"] = _vol_topn_labels(w[dim_col], top_n)
+        if step == "calls":
+            ct = w.groupby(["period", "_lbl"], sort=False).size().reset_index(name="val")
+        elif step == "ci_contact":
+            if "ib_contact_calls" not in w.columns:
+                return pd.DataFrame()
+            ct = w.groupby(["period", "_lbl"], sort=False)["ib_contact_calls"].sum().reset_index(name="val")
+        elif step == "ci_credit":
+            if "credit_calls_flag" not in w.columns:
+                return pd.DataFrame()
+            ct = w.groupby(["period", "_lbl"], sort=False)["credit_calls_flag"].sum().reset_index(name="val")
+        elif step == "sales":
+            if "orders" not in w.columns:
+                return pd.DataFrame()
+            ct = w.groupby(["period", "_lbl"], sort=False)["orders"].sum().reset_index(name="val")
+        else:
+            return pd.DataFrame()
+        ct["period"] = pd.to_datetime(ct["period"])
+        pivot = ct.pivot(index="period", columns="_lbl", values="val").fillna(0)
+        return pivot.sort_index()
+
+    v_ts = _vol_inbound_frame(df)
+    vol_cmp_base = apply_filters(df_raw.copy(), use_date_range=False)
+    v_cmp_in = _vol_inbound_frame(vol_cmp_base)
+
+    if v_ts.empty and v_cmp_in.empty:
+        st.info("No inbound calls match the current filters.")
+    else:
+        vc1, vc2, vc3 = st.columns([1, 1, 1])
+        with vc1:
+            vol_gran = st.radio(
+                "Granularity",
+                PERIOD_OPTIONS,
+                index=1,
+                horizontal=True,
+                key="vol_granularity",
+            )
+        with vc2:
+            vol_dim_label = st.selectbox(
+                "Mix dimension",
+                list(VOL_DIM_CHOICES.keys()),
+                index=0,
+                key="vol_mix_dim",
+            )
+        with vc3:
+            vol_top_n = st.slider("Top categories (rest → Other)", 4, 14, 8, key="vol_top_n")
+
+        vol_mix_step_label = st.selectbox(
+            "Funnel step (mix)",
+            list(VOL_MIX_STEP_CHOICES.keys()),
+            index=0,
+            key="vol_funnel_mix_step",
+            help="Net Calls = inbound call counts. CiContact / CiCredit = sums of those flags by bucket. Sales = order counts by bucket. Each period’s lines show % of that step’s total attributed to each category.",
+        )
+        vol_mix_step = VOL_MIX_STEP_CHOICES[vol_mix_step_label]
+
+        vol_dim_col = VOL_DIM_CHOICES[vol_dim_label]
+
+        # — Mix over time (sidebar date range): line chart by funnel step
+        pivot = _vol_funnel_step_mix_pivot(v_ts, vol_gran, vol_dim_col, vol_top_n, vol_mix_step)
+        if not pivot.empty:
+            cats = list(pivot.columns)
+            xdisp = pivot.index.strftime(PERIOD_FMT[vol_gran]).tolist()
+
+            row_sum = pivot.sum(axis=1).replace(0, np.nan)
+            mix_pct = pivot.div(row_sum, axis=0) * 100.0
+            fig_lines = go.Figure()
+            _cw = colorway_cycled(len(cats))
+            for i, c in enumerate(cats):
+                fig_lines.add_trace(
+                    go.Scatter(
+                        x=xdisp,
+                        y=mix_pct[c].values,
+                        mode="lines+markers",
+                        name=str(c),
+                        line=dict(width=2, color=_cw[i]),
+                        marker=dict(size=6, color=_cw[i]),
+                    )
+                )
+            _y_mix_title = VOL_MIX_STEP_YAXIS.get(vol_mix_step, "Share (%)")
+            apply_chart_theme(
+                fig_lines,
+                title=layout_chart_title(f"{vol_mix_step_label} mix (%) — {vol_dim_label}"),
+                xaxis=plotly_axis_extra("Period"),
+                yaxis=plotly_axis_extra(_y_mix_title, tickformat=".0f"),
+                height=420,
+                margin=dict(l=52, r=20, t=52, b=100),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.38, x=0),
+            )
+            st.plotly_chart(fig_lines, use_container_width=True)
+        elif not v_ts.empty:
+            st.info(
+                "Not enough data to chart this funnel step for the selected dimension and granularity "
+                "(or a required column is missing)."
+            )
+
+        # — Custom period mix comparison (same date rules as Overview custom period)
+        st.divider()
+        st.subheader("Custom Period Mix Comparison")
+        st.caption(
+            "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
+            "Each period is **% of inbound calls** in each category (top-N + Other), plus P2 vs P1 change. "
+            "**Performance Metric** uses the same definitions as the Overview funnel, computed **within each mix category** "
+            "(all calls in that bucket for the period)."
+        )
+
+        if "call_date_est" not in vol_cmp_base.columns or len(vol_cmp_base) == 0:
+            st.info("No data available for period comparison with current filters.")
+        elif v_cmp_in.empty:
+            st.info("No inbound calls for period comparison with current filters.")
+        else:
+            _cmp_min = vol_cmp_base["call_date_est"].min().date()
+            _cmp_max = vol_cmp_base["call_date_est"].max().date()
+            _cmp_cap = min(_cmp_max, report_through_date())
+            if _cmp_cap < _cmp_min:
+                _cmp_cap = _cmp_min
+            _w = timedelta(days=6)
+            _d2_end = max(_cmp_min, _cmp_cap)
+            _d2_start = max(_cmp_min, _d2_end - _w)
+            _d1_end = _d2_start - timedelta(days=1)
+            _d1_start = max(_cmp_min, _d1_end - _w)
+            if _d1_start > _d1_end:
+                _d1_start = _cmp_min
+                _d1_end = min(_cmp_cap, _d1_start + _w)
+
+            _VCK1, _VCK2 = "vol_cmp_period1", "vol_cmp_period2"
+
+            if _VCK1 not in st.session_state:
+                st.session_state[_VCK1] = (_d1_start, _d1_end)
+            if _VCK2 not in st.session_state:
+                st.session_state[_VCK2] = (_d2_start, _d2_end)
+            _rv1 = st.session_state.get(_VCK1)
+            if isinstance(_rv1, (tuple, list)) and len(_rv1) == 2:
+                st.session_state[_VCK1] = cmp_date_range_clamp(
+                    _cmp_min, _cmp_cap, tuple(_rv1), (_d1_start, _d1_end)
+                )
+            _rv2 = st.session_state.get(_VCK2)
+            if isinstance(_rv2, (tuple, list)) and len(_rv2) == 2:
+                st.session_state[_VCK2] = cmp_date_range_clamp(
+                    _cmp_min, _cmp_cap, tuple(_rv2), (_d2_start, _d2_end)
+                )
+
+            vpc_a, vpc_b = st.columns(2)
+            with vpc_a:
+                vol_cmp_range_1 = st.date_input(
+                    "Period 1",
+                    min_value=_cmp_min,
+                    max_value=_cmp_cap,
+                    key=_VCK1,
+                )
+            with vpc_b:
+                vol_cmp_range_2 = st.date_input(
+                    "Period 2",
+                    min_value=_cmp_min,
+                    max_value=_cmp_cap,
+                    key=_VCK2,
+                )
+
+            _vol_metric_opts = [m for m, _ in FUNNEL_METRICS]
+            _vol_metric_default_i = _vol_metric_opts.index("NC") if "NC" in _vol_metric_opts else 0
+            vol_cmp_metric = st.selectbox(
+                "Performance Metric",
+                _vol_metric_opts,
+                index=_vol_metric_default_i,
+                key="vol_cmp_funnel_metric",
+                help="Same definitions as the Overview funnel table. Values are computed on all calls in each mix bucket.",
+            )
+
+            def _vol_slice_period(d_all, dr):
+                if len(dr) != 2:
+                    return d_all.iloc[0:0]
+                a, b = dr[0], dr[1]
+                if a > b:
+                    a, b = b, a
+                m = (d_all["call_date_est"].dt.date >= a) & (d_all["call_date_est"].dt.date <= b)
+                return d_all.loc[m]
+
+            def _vol_mix_counts(sub: pd.DataFrame) -> pd.Series:
+                if sub.empty or vol_dim_col not in sub.columns:
+                    return pd.Series(dtype=int)
+                lbl = _vol_topn_labels(sub[vol_dim_col], vol_top_n)
+                return lbl.value_counts()
+
+            if len(vol_cmp_range_1) == 2 and len(vol_cmp_range_2) == 2:
+                g1 = _vol_slice_period(v_cmp_in, vol_cmp_range_1)
+                g2 = _vol_slice_period(v_cmp_in, vol_cmp_range_2)
+                c1a, c1b = sorted([vol_cmp_range_1[0], vol_cmp_range_1[1]])
+                c2a, c2b = sorted([vol_cmp_range_2[0], vol_cmp_range_2[1]])
+                col1 = f"P1 ({c1a:%b %d, %Y} – {c1b:%b %d, %Y})"
+                col2 = f"P2 ({c2a:%b %d, %Y} – {c2b:%b %d, %Y})"
+
+                n1 = _vol_mix_counts(g1)
+                n2 = _vol_mix_counts(g2)
+                union_ix = sorted(set(n1.index.astype(str)) | set(n2.index.astype(str)), key=lambda x: (x == "Other", x))
+                n1a = n1.reindex(union_ix).fillna(0)
+                n2a = n2.reindex(union_ix).fillna(0)
+                t1 = float(n1a.sum()) or 1.0
+                t2 = float(n2a.sum()) or 1.0
+                p1 = (n1a / t1 * 100.0).rename("p1")
+                p2 = (n2a / t2 * 100.0).rename("p2")
+                dfb = pd.DataFrame({"Category": union_ix, col1: p1.values, col2: p2.values})
+                dfb["Δ (P2 − P1, ppt)"] = dfb[col2] - dfb[col1]
+                dfb["% Change (P2 vs P1)"] = dfb.apply(
+                    lambda r: "—"
+                    if r[col1] == 0
+                    else f"{(r[col2] / r[col1] - 1) * 100:+.1f}%",
+                    axis=1,
+                )
+                _mix_chg = "% Change (P2 vs P1)"
+
+                _m_fmt = FUNNEL_METRIC_FMT[vol_cmp_metric]
+                _m_p1 = f"{vol_cmp_metric} (P1)"
+                _m_p2 = f"{vol_cmp_metric} (P2)"
+                _m_d = f"{vol_cmp_metric} (Δ)"
+                _m_pch = f"{vol_cmp_metric} (% Change (P2 vs P1))"
+
+                g1_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_1)
+                g2_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_2)
+                _raw_m1, _raw_m2 = [], []
+                for cat in union_ix:
+                    if (
+                        vol_dim_col not in g1_all.columns
+                        or vol_dim_col not in g2_all.columns
+                        or g1_all.empty
+                        or g2_all.empty
+                    ):
+                        _raw_m1.append(float("nan"))
+                        _raw_m2.append(float("nan"))
+                        continue
+                    l1 = _vol_topn_labels(g1_all[vol_dim_col], vol_top_n)
+                    l2 = _vol_topn_labels(g2_all[vol_dim_col], vol_top_n)
+                    s1 = g1_all.loc[l1.eq(cat)]
+                    s2 = g2_all.loc[l2.eq(cat)]
+                    _raw_m1.append(compute_funnel_row(s1, vol_cmp_metric))
+                    _raw_m2.append(compute_funnel_row(s2, vol_cmp_metric))
+
+                dfb[_m_p1] = [fmt_funnel(a, _m_fmt) for a in _raw_m1]
+                dfb[_m_p2] = [fmt_funnel(b, _m_fmt) for b in _raw_m2]
+                dfb[_m_d] = [fmt_funnel_delta(a, b, _m_fmt) for a, b in zip(_raw_m1, _raw_m2)]
+                dfb[_m_pch] = [fmt_pct_change_str(pct_change_vs_prior(a, b)) for a, b in zip(_raw_m1, _raw_m2)]
+
+                def _style_vol_cmp_row(row):
+                    out = pd.Series("", index=row.index)
+                    p_mix = parse_display_pct(row[_mix_chg])
+                    if p_mix is not None:
+                        out[_mix_chg] = theme.pct_change_cell_style("mix_share_pct", p_mix)
+                    p_met = parse_display_pct(row[_m_pch])
+                    if p_met is not None:
+                        out[_m_pch] = theme.pct_change_cell_style(vol_cmp_metric, p_met)
+                    return out
+
+                st.dataframe(
+                    dfb.style.apply(_style_vol_cmp_row, axis=1).format(
+                        {col1: "{:.2f}%", col2: "{:.2f}%", "Δ (P2 − P1, ppt)": "{:+.2f}"},
+                        na_rep="—",
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=dataframe_display_height(len(dfb)),
+                )
+                table_export_row(dfb, "volume_mix_period_comparison.csv")
+
+                pa = dfb.set_index("Category")[col1]
+                pb = dfb.set_index("Category")[col2]
+                _n_cat = len(union_ix)
+                _vol_cmp_layout = volume_comparison_bars_layout(_n_cat)
+                fig_cmp = go.Figure()
+                fig_cmp.add_trace(
+                    go.Bar(
+                        name="Period 1",
+                        x=union_ix,
+                        y=pa.values,
+                        marker_color=PLOT_COLORWAY[0],
+                        hovertemplate="%{x}<br>" + col1 + "<br>%{y:.2f}%<extra></extra>",
+                    )
+                )
+                fig_cmp.add_trace(
+                    go.Bar(
+                        name="Period 2",
+                        x=union_ix,
+                        y=pb.values,
+                        marker_color=PLOT_COLORWAY[1],
+                        hovertemplate="%{x}<br>" + col2 + "<br>%{y:.2f}%<extra></extra>",
+                    )
+                )
+                apply_chart_theme(
+                    fig_cmp,
+                    title=layout_chart_title(f"Mix Comparison — {vol_dim_label} (% of inbound calls)"),
+                    barmode="group",
+                    xaxis=plotly_axis_extra(
+                        vol_dim_label,
+                        tickangle=-28,
+                        automargin=True,
+                    ),
+                    yaxis=plotly_axis_extra("Share (%)", tickformat=".1f"),
+                    **_vol_cmp_layout,
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+                _y1 = [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else float("nan") for x in _raw_m1]
+                _y2 = [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else float("nan") for x in _raw_m2]
+                _ht1, _ht2, _ytf, _ytp, _yts = funnel_metric_bar_hover_and_ticks(_m_fmt)
+
+                fig_m_cmp = go.Figure()
+                fig_m_cmp.add_trace(
+                    go.Bar(
+                        name="Period 1",
+                        x=union_ix,
+                        y=_y1,
+                        marker_color=PLOT_COLORWAY[0],
+                        hovertemplate=_ht1,
+                    )
+                )
+                fig_m_cmp.add_trace(
+                    go.Bar(
+                        name="Period 2",
+                        x=union_ix,
+                        y=_y2,
+                        marker_color=PLOT_COLORWAY[1],
+                        hovertemplate=_ht2,
+                    )
+                )
+                apply_chart_theme(
+                    fig_m_cmp,
+                    title=layout_chart_title(f"{vol_cmp_metric} by {vol_dim_label} (P1 vs P2)"),
+                    barmode="group",
+                    xaxis=plotly_axis_extra(
+                        vol_dim_label,
+                        tickangle=-28,
+                        automargin=True,
+                    ),
+                    yaxis_tickformat=_ytf,
+                    yaxis_tickprefix=_ytp,
+                    yaxis_ticksuffix=_yts,
+                    yaxis_title=vol_cmp_metric,
+                    **_vol_cmp_layout,
+                )
+                st.plotly_chart(fig_m_cmp, use_container_width=True)
+            else:
+                st.info("Select a full start and end date for each period.")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB — AGENT LEVEL
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_agent:
 
-    st.subheader("Agent-Level Performance")
+    st.subheader("Agent Level Performance")
     st.caption(
         "One row per agent. All sidebar filters apply. "
         "GCV metrics are per-call averages. Rates are computed from calls in the filtered date range."
@@ -922,8 +1342,7 @@ with tab_agent:
         # Distribution charts
         dc1, dc2 = st.columns(2)
 
-        _hist_line = "#cbd5e1" if chart_theme_is_light() else "#252b3a"
-        _ht = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
+        _hist_line, _ht = chart_hist_stroke_and_title()
         with dc1:
             st.markdown("**Net Conversion × Agents (Distribution)**")
             fig_nc = go.Figure(go.Histogram(
@@ -935,7 +1354,7 @@ with tab_agent:
             ))
             apply_chart_theme(
                 fig_nc,
-                title=dict(text="Net conversion × agents", x=0.02, xanchor="left", font=dict(size=14, color=_ht)),
+                title=layout_chart_title("Net conversion × agents", size=14),
                 xaxis_tickformat=".1%",
                 xaxis_title="Net conversion",
                 yaxis_title="Agents",
@@ -954,7 +1373,7 @@ with tab_agent:
             ))
             apply_chart_theme(
                 fig_rc,
-                title=dict(text="Revenue per call × agents", x=0.02, xanchor="left", font=dict(size=14, color=_ht)),
+                title=layout_chart_title("Revenue per call × agents", size=14),
                 xaxis_tickformat="$,.0f",
                 xaxis_title="Revenue per call",
                 yaxis_title="Agents",
@@ -1354,7 +1773,7 @@ with tab_lift:
             lbl,
             val,
             delta=delta,
-            delta_color="inverse" if k in LIFT_KPI_LOWER_IS_BETTER else "normal",
+            delta_color="inverse" if k in theme.LIFT_KPI_LOWER_IS_BETTER else "normal",
         )
 
     st.divider()
@@ -1407,7 +1826,7 @@ with tab_lift:
             p = parse_display_pct(row[col])
             if p is None:
                 continue
-            out[col] = pct_change_cell_style(k, p)
+            out[col] = theme.pct_change_cell_style(k, p)
         return out
 
     summary_tbl = pd.DataFrame(table_rows)
@@ -1614,10 +2033,9 @@ with tab_lift:
 
         _lift_ax = plotly_axis_lines()
         _lift_title = lift_chart_title(lift_metric, lift_group_choice, lift_view)
-        _lift_tcol = "#0f172a" if chart_theme_is_light() else "#e8ecf4"
         apply_chart_theme(
             fig_lift,
-            title=dict(text=_lift_title, x=0.02, xanchor="left", font=dict(size=16, color=_lift_tcol)),
+            title=layout_chart_title(_lift_title),
             yaxis_tickformat=".1%" if is_pct else ("$,.1f" if is_dollar else ".2f"),
             yaxis_tickprefix="$" if is_dollar else "",
             xaxis=dict(
@@ -1631,7 +2049,7 @@ with tab_lift:
         )
 
         if lift_view in ("Post Δ (Arc/Atom−1)", "Swing (Post Δ − Pre Δ)"):
-            _hcol = "#64748b" if chart_theme_is_light() else "#4d5669"
+            _hcol = chart_hline_reference()
             fig_lift.add_hline(
                 y=0,
                 line_dash="dash",

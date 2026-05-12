@@ -117,9 +117,48 @@ def restore_theme_from_query_params() -> None:
     st.session_state[_THEME_URL_SIG_KEY] = sig
 
 
+def init_browser_query_state() -> None:
+    """Call at app startup: restore theme + overview comparison dates from URL (after host reload)."""
+    restore_theme_from_query_params()
+    restore_cmp_dates_from_query_params()
+
+
 def is_light_theme() -> bool:
     """True when the user selected Light in the sidebar theme control."""
     return st.session_state.get(THEME_RADIO_KEY, "Dark") == "Light"
+
+
+# Delta / % styling for tables (funnel names + lift KPI keys)
+FUNNEL_METRIC_LOWER_IS_BETTER = frozenset({"Talk Time", "Sold Talk Time", "Unsold Talk Time"})
+LIFT_KPI_LOWER_IS_BETTER = frozenset({"tt"})
+
+
+def pct_change_cell_style(metric_id: str, pct_num: float, neutral_abs: float = 1.5) -> str:
+    """CSS for a numeric % change cell. ``metric_id`` = funnel Metric name, ``mix_share_pct``, or lift key (e.g. ``tt``)."""
+    import math
+
+    if pct_num is None:
+        return ""
+    try:
+        p = float(pct_num)
+    except (TypeError, ValueError):
+        return ""
+    if math.isnan(p) or math.isinf(p):
+        return ""
+    light = is_light_theme()
+    if abs(p) < neutral_abs:
+        if light:
+            return "background-color: #fef9c3; color: #854d0e"
+        return "background-color: #2a2a1a; color: #c8a000"
+    lower_better = metric_id in FUNNEL_METRIC_LOWER_IS_BETTER or metric_id in LIFT_KPI_LOWER_IS_BETTER
+    good = (p < 0) if lower_better else (p > 0)
+    if good:
+        if light:
+            return "background-color: #dcfce7; color: #166534"
+        return "background-color: #0f2a1a; color: #22c55e"
+    if light:
+        return "background-color: #ffe4e6; color: #be123c"
+    return "background-color: #2a1018; color: #f43f5e"
 
 
 def render_app_theme_toggle() -> str:
