@@ -115,7 +115,7 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
         )
 
 # ── Load data ──────────────────────────────────────────────────────────────────
-@st.cache_data(ttl="3h")
+@st.cache_data(ttl="24h")
 def load_data():
     data_dir = "data/"
     files = [f for f in os.listdir(data_dir) if f.startswith("agent_calls_") and f.endswith(".csv")]
@@ -447,14 +447,21 @@ def fmt_funnel_delta(v1, v2, fmt):
 
 
 def mix_shift_decomposition(w1_frac: np.ndarray, w2_frac: np.ndarray, r1: np.ndarray, r2: np.ndarray) -> dict:
-    """Blended = Σ w·r; total change = mix + rate + interaction (same units as r)."""
+    """Blended = Σ w·r; total change = mix + rate + interaction (same units as r).
+
+    Mix effect uses the relative form ``(w2 - w1) * (r1 - blended_P1)`` so that
+    each bucket's mix contribution is signed against the P1 weighted-average
+    rate. With weights summing to 1, this keeps the overall mix-impact total
+    identical to the absolute form while making per-bucket signs reflect
+    whether the bucket sits above or below the P1 blended rate.
+    """
     w1 = np.asarray(w1_frac, dtype=float)
     w2 = np.asarray(w2_frac, dtype=float)
     r1 = np.nan_to_num(np.asarray(r1, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     r2 = np.nan_to_num(np.asarray(r2, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     b1 = float(np.dot(w1, r1))
     b2 = float(np.dot(w2, r2))
-    mix_e = (w2 - w1) * r1
+    mix_e = (w2 - w1) * (r1 - b1)
     rate_e = w1 * (r2 - r1)
     inter_e = (w2 - w1) * (r2 - r1)
     return {
