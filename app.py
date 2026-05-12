@@ -115,7 +115,7 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
         )
 
 # ── Load data ──────────────────────────────────────────────────────────────────
-@st.cache_data(ttl="24h")
+@st.cache_data(ttl="3h")
 def load_data():
     data_dir = "data/"
     files = [f for f in os.listdir(data_dir) if f.startswith("agent_calls_") and f.endswith(".csv")]
