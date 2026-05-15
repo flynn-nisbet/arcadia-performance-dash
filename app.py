@@ -129,6 +129,8 @@ def load_data():
     
     df = pd.concat(dfs, ignore_index=True)
     df["call_date_est"] = pd.to_datetime(df["call_date_est"])
+    if "call_type" in df.columns:
+        df["call_type"] = df["call_type"].replace({"Permalease": "SERP", "Site Session": "Site"})
     return df
 
 try:
@@ -162,16 +164,21 @@ with st.sidebar:
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
     tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
     calltype_opts = sorted(df_raw["call_type"].dropna().unique().tolist()) if "call_type" in df_raw.columns else []
-    sel_center   = st.multiselect("Center",           options=center_opts,   default=[], key="f_center")
-    sel_mkt      = st.multiselect("Marketing Bucket", options=mkt_opts,      default=[], key="f_mkt")
-    sel_mov      = st.multiselect("Mover / Switcher", options=mov_opts,      default=[], key="f_mov")
-    sel_tenure   = st.multiselect("Tenure Bucket",    options=tenure_opts,   default=[], key="f_tenure")
-    sel_calltype = st.multiselect("Site/SERP",        options=calltype_opts, default=[], key="f_calltype")
+
+    sel_center         = st.multiselect("Center",           options=center_opts,         default=[], key="f_center")
+    sel_brand_nonbrand = st.multiselect("Brand / Non-Brand", options=["Brand", "Non-Brand"], default=[], key="f_brand_nonbrand")
+    sel_mkt            = st.multiselect("Marketing Bucket", options=mkt_opts,            default=[], key="f_mkt")
+    sel_mov            = st.multiselect("Mover / Switcher", options=mov_opts,            default=[], key="f_mov")
+    sel_tenure         = st.multiselect("Tenure Bucket",    options=tenure_opts,         default=[], key="f_tenure")
+    sel_calltype       = st.multiselect("Site/SERP",        options=calltype_opts,       default=[], key="f_calltype")
 
     st.divider()
     _arcadia_theme_choice = theme.render_app_theme_toggle()
 
 theme.inject_app_styles(light=_arcadia_theme_choice == "Light")
+
+# Brand bucket names — both spellings seen in production data
+BRAND_BUCKETS = {"Brand Partner", "Brand-Partner", "Competitor", "NRG"}
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
@@ -181,8 +188,17 @@ def apply_filters(base, use_date_range=True):
         d = d[d["membership"] == "Arcadia"]
     if use_date_range and len(date_range) == 2:
         d = d[(d["call_date_est"].dt.date >= date_range[0]) & (d["call_date_est"].dt.date <= date_range[1])]
-    if sel_center   and "center_location"  in d.columns: d = d[d["center_location"].isin(sel_center)]
-    if sel_mkt      and "marketing_bucket" in d.columns: d = d[d["marketing_bucket"].isin(sel_mkt)]
+    if sel_center and "center_location" in d.columns:
+        d = d[d["center_location"].isin(sel_center)]
+    if sel_brand_nonbrand and "marketing_bucket" in d.columns:
+        implied: set = set()
+        if "Brand" in sel_brand_nonbrand:
+            implied |= BRAND_BUCKETS & set(mkt_opts)
+        if "Non-Brand" in sel_brand_nonbrand:
+            implied |= set(mkt_opts) - BRAND_BUCKETS
+        d = d[d["marketing_bucket"].isin(implied)]
+    if sel_mkt and "marketing_bucket" in d.columns:
+        d = d[d["marketing_bucket"].isin(sel_mkt)]
     if sel_mov      and "moverSwitcher"    in d.columns: d = d[d["moverSwitcher"].isin(sel_mov)]
     if sel_tenure   and "tenure_bucket"    in d.columns: d = d[d["tenure_bucket"].isin(sel_tenure)]
     if sel_calltype and "call_type"        in d.columns: d = d[d["call_type"].isin(sel_calltype)]
@@ -917,6 +933,7 @@ with tab_volume:
         "Mover / Switcher": "moverSwitcher",
         "Tenure Bucket": "tenure_bucket",
         "Site/SERP": "call_type",
+        "Brand / Non-Brand": "_brand_nonbrand",
     }
     # Funnel-step mix for the trend line chart (denominator = period total of that step).
     VOL_MIX_STEP_CHOICES = {
@@ -945,15 +962,31 @@ with tab_volume:
         keep = set(s.value_counts().nlargest(top_n).index)
         return s.where(s.isin(keep), "Other")
 
+    def _get_vol_dim_labels(df: pd.DataFrame, dim_col: str, top_n: int) -> pd.Series:
+        """Return a label series for dim_col, handling the virtual '_brand_nonbrand' dimension."""
+        if dim_col == "_brand_nonbrand":
+            if "marketing_bucket" not in df.columns:
+                return pd.Series("(missing)", index=df.index)
+            brand_mask = df["marketing_bucket"].fillna("").isin(BRAND_BUCKETS)
+            return pd.Series(np.where(brand_mask, "Brand", "Non-Brand"), index=df.index)
+        if dim_col not in df.columns:
+            return pd.Series("(missing)", index=df.index)
+        return _vol_topn_labels(df[dim_col], top_n)
+
     def _vol_funnel_step_mix_pivot(
-        v_in: pd.DataFrame, gran: str, dim_col: str, top_n: int, step: str
+        v_in: pd.DataFrame, gran: str, dim_col: str, top_n: int, step: str, dim2_col: str = ""
     ) -> pd.DataFrame:
         """Wide volumes per period × category for ``step``; convert to mix % with row-wise totals."""
-        if v_in.empty or dim_col not in v_in.columns:
+        if v_in.empty or (dim_col not in v_in.columns and dim_col != "_brand_nonbrand"):
             return pd.DataFrame()
         w = v_in.copy()
         w["period"] = period_labels(w["call_date_est"], gran)
-        w["_lbl"] = _vol_topn_labels(w[dim_col], top_n)
+        lbl1 = _get_vol_dim_labels(w, dim_col, top_n)
+        if dim2_col:
+            lbl2 = _get_vol_dim_labels(w, dim2_col, top_n)
+            w["_lbl"] = lbl2.astype(str) + " " + lbl1.astype(str)
+        else:
+            w["_lbl"] = lbl1
         if step == "calls":
             ct = w.groupby(["period", "_lbl"], sort=False).size().reset_index(name="val")
         elif step == "ci_contact":
@@ -981,7 +1014,7 @@ with tab_volume:
     if v_ts.empty and v_cmp_in.empty:
         st.info("No inbound calls match the current filters.")
     else:
-        vc1, vc2, vc3 = st.columns([1, 1, 1])
+        vc1, vc2, vc3, vc4 = st.columns([1, 1, 1, 1])
         with vc1:
             vol_gran = st.radio(
                 "Granularity",
@@ -992,12 +1025,20 @@ with tab_volume:
             )
         with vc2:
             vol_dim_label = st.selectbox(
-                "Mix dimension",
+                "Mix dimension 1",
                 list(VOL_DIM_CHOICES.keys()),
                 index=0,
                 key="vol_mix_dim",
             )
         with vc3:
+            _dim2_options = ["All"] + list(VOL_DIM_CHOICES.keys())
+            vol_dim2_label = st.selectbox(
+                "Mix dimension 2",
+                _dim2_options,
+                index=0,
+                key="vol_mix_dim2",
+            )
+        with vc4:
             vol_top_n = st.slider("Top categories (rest → Other)", 4, 14, 8, key="vol_top_n")
 
         vol_mix_step_label = st.selectbox(
@@ -1010,9 +1051,11 @@ with tab_volume:
         vol_mix_step = VOL_MIX_STEP_CHOICES[vol_mix_step_label]
 
         vol_dim_col = VOL_DIM_CHOICES[vol_dim_label]
+        vol_dim2_col = "" if vol_dim2_label == "All" else VOL_DIM_CHOICES[vol_dim2_label]
+        _dim_title = vol_dim_label if not vol_dim2_col else f"{vol_dim_label} × {vol_dim2_label}"
 
         # — Mix over time (sidebar date range): line chart by funnel step
-        pivot = _vol_funnel_step_mix_pivot(v_ts, vol_gran, vol_dim_col, vol_top_n, vol_mix_step)
+        pivot = _vol_funnel_step_mix_pivot(v_ts, vol_gran, vol_dim_col, vol_top_n, vol_mix_step, vol_dim2_col)
         if not pivot.empty:
             cats = list(pivot.columns)
             xdisp = pivot.index.strftime(PERIOD_FMT[vol_gran]).tolist()
@@ -1035,7 +1078,7 @@ with tab_volume:
             _y_mix_title = VOL_MIX_STEP_YAXIS.get(vol_mix_step, "Share (%)")
             apply_chart_theme(
                 fig_lines,
-                title=layout_chart_title(f"{vol_mix_step_label} mix (%) — {vol_dim_label}"),
+                title=layout_chart_title(f"{vol_mix_step_label} mix (%) — {_dim_title}"),
                 xaxis=plotly_axis_extra("Period"),
                 yaxis=plotly_axis_extra(_y_mix_title, tickformat=".0f"),
                 height=420,
@@ -1131,9 +1174,14 @@ with tab_volume:
                 return d_all.loc[m]
 
             def _vol_mix_counts(sub: pd.DataFrame) -> pd.Series:
-                if sub.empty or vol_dim_col not in sub.columns:
+                if sub.empty or (vol_dim_col not in sub.columns and vol_dim_col != "_brand_nonbrand"):
                     return pd.Series(dtype=int)
-                lbl = _vol_topn_labels(sub[vol_dim_col], vol_top_n)
+                lbl1 = _get_vol_dim_labels(sub, vol_dim_col, vol_top_n)
+                if vol_dim2_col:
+                    lbl2 = _get_vol_dim_labels(sub, vol_dim2_col, vol_top_n)
+                    lbl = lbl2.astype(str) + " " + lbl1.astype(str)
+                else:
+                    lbl = lbl1
                 return lbl.value_counts()
 
             if len(vol_cmp_range_1) == 2 and len(vol_cmp_range_2) == 2:
@@ -1161,16 +1209,24 @@ with tab_volume:
                 _raw_m1, _raw_m2 = [], []
                 for cat in union_ix:
                     if (
-                        vol_dim_col not in g1_all.columns
-                        or vol_dim_col not in g2_all.columns
+                        (vol_dim_col not in g1_all.columns and vol_dim_col != "_brand_nonbrand")
+                        or (vol_dim_col not in g2_all.columns and vol_dim_col != "_brand_nonbrand")
                         or g1_all.empty
                         or g2_all.empty
                     ):
                         _raw_m1.append(float("nan"))
                         _raw_m2.append(float("nan"))
                         continue
-                    l1 = _vol_topn_labels(g1_all[vol_dim_col], vol_top_n)
-                    l2 = _vol_topn_labels(g2_all[vol_dim_col], vol_top_n)
+                    _lbl1_g1 = _get_vol_dim_labels(g1_all, vol_dim_col, vol_top_n)
+                    _lbl1_g2 = _get_vol_dim_labels(g2_all, vol_dim_col, vol_top_n)
+                    if vol_dim2_col:
+                        _lbl2_g1 = _get_vol_dim_labels(g1_all, vol_dim2_col, vol_top_n)
+                        _lbl2_g2 = _get_vol_dim_labels(g2_all, vol_dim2_col, vol_top_n)
+                        l1 = _lbl2_g1.astype(str) + " " + _lbl1_g1.astype(str)
+                        l2 = _lbl2_g2.astype(str) + " " + _lbl1_g2.astype(str)
+                    else:
+                        l1 = _lbl1_g1
+                        l2 = _lbl1_g2
                     s1 = g1_all.loc[l1.eq(cat)]
                     s2 = g2_all.loc[l2.eq(cat)]
                     _raw_m1.append(compute_funnel_row(s1, vol_cmp_metric))
@@ -1333,10 +1389,10 @@ with tab_volume:
                 )
                 apply_chart_theme(
                     fig_cmp,
-                    title=layout_chart_title(f"Mix Comparison — {vol_dim_label} (% of inbound calls)"),
+                    title=layout_chart_title(f"Mix Comparison — {_dim_title} (% of inbound calls)"),
                     barmode="group",
                     xaxis=plotly_axis_extra(
-                        vol_dim_label,
+                        _dim_title,
                         tickangle=-28,
                         automargin=True,
                     ),
@@ -1370,10 +1426,10 @@ with tab_volume:
                 )
                 apply_chart_theme(
                     fig_m_cmp,
-                    title=layout_chart_title(f"{vol_cmp_metric} by {vol_dim_label} (P1 vs P2)"),
+                    title=layout_chart_title(f"{vol_cmp_metric} by {_dim_title} (P1 vs P2)"),
                     barmode="group",
                     xaxis=plotly_axis_extra(
-                        vol_dim_label,
+                        _dim_title,
                         tickangle=-28,
                         automargin=True,
                     ),
@@ -1399,6 +1455,7 @@ with tab_volume:
                 _c_rate = "#3d8ef8"
                 _c_int = "#94a3b8" if theme.is_light_theme() else "#64748b"
                 _c_tot = "#a78bfa"
+                _show_interaction = st.toggle("Show interaction impact", value=True, key="vol_show_interaction")
                 fig_dec = go.Figure()
                 fig_dec.add_trace(
                     go.Bar(
@@ -1418,15 +1475,16 @@ with tab_volume:
                         hovertemplate="%{x}<br>rate %{y:.1f}<extra></extra>",
                     )
                 )
-                fig_dec.add_trace(
-                    go.Bar(
-                        name="Interaction impact",
-                        x=_x_dec,
-                        y=_yi,
-                        marker_color=_c_int,
-                        hovertemplate="%{x}<br>interaction %{y:.1f}<extra></extra>",
+                if _show_interaction:
+                    fig_dec.add_trace(
+                        go.Bar(
+                            name="Interaction impact",
+                            x=_x_dec,
+                            y=_yi,
+                            marker_color=_c_int,
+                            hovertemplate="%{x}<br>interaction %{y:.1f}<extra></extra>",
+                        )
                     )
-                )
                 fig_dec.add_trace(
                     go.Bar(
                         name="Total impact",
@@ -1441,9 +1499,9 @@ with tab_volume:
                     fig_dec,
                     title=layout_chart_title(_dec_title),
                     barmode="group",
-                    xaxis=plotly_axis_extra(vol_dim_label, tickangle=-28, automargin=True),
+                    xaxis=plotly_axis_extra(_dim_title, tickangle=-28, automargin=True),
                     yaxis=plotly_axis_extra(_y_title, tickformat=".1f"),
-                    **_vol_dec_layout,
+                    **{**_vol_dec_layout, "legend": dict(orientation="h", yanchor="top", y=1.0, x=0, xanchor="left")},
                 )
                 fig_dec.add_hline(
                     y=0,
