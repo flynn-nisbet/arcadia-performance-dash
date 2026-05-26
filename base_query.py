@@ -1,6 +1,8 @@
 from databricks.connect import DatabricksSession
 from datetime import date
 import pandas as pd
+import os
+import glob
 
 def get_data():
     spark = DatabricksSession.builder \
@@ -46,14 +48,12 @@ def get_data():
       FROM energy_prod.energy.v_agent_calls acf
       WHERE acf.call_datetime_est     >= (SELECT from_ts_est FROM params)
         AND acf.conversion_exclude_ind IS NULL
-      -- Removed: call_direction = 'INBOUND' filter to include outbound calls
     ),
 
     acf_dedup AS (
       SELECT * FROM acf_base WHERE rn = 1
     ),
 
-    -- For each sub-30s call, find that agent's most recent prior call that is >30 seconds
     short_call_anchor AS (
       SELECT
         short.call_id                                                          AS short_call_id,
@@ -67,7 +67,6 @@ def get_data():
       GROUP BY short.call_id
     ),
 
-    -- Resolve the actual call_id of that anchor call
     short_call_anchor_id AS (
       SELECT
         sca.short_call_id,
@@ -92,7 +91,8 @@ def get_data():
         o.call_id,
         COUNT(DISTINCT o.order_id)                                                       AS orders,
         SUM(COALESCE(o.gcv_v2, 0))                                                      AS gcv_fo,
-        MAX(CASE WHEN o.product_name = '12 Month - Prepaid' THEN 1 ELSE 0 END)          AS has_prepaid_12m
+        MAX(o.product_name)                                                              AS product_name,
+        MAX(o.partner_name)                                                              AS partner_name
       FROM energy_prod.energy.v_orders o
       INNER JOIN acf_dedup acf ON acf.call_id = o.call_id
       WHERE DATE(
@@ -146,10 +146,8 @@ def get_data():
         ELSE 'Site Session'
       END                                                               AS call_type,
 
-      -- Call direction indicator (change 1: outbound included, direction surfaced)
       COALESCE(acf.call_direction, 'UNKNOWN')                          AS call_direction,
 
-      -- Membership: for sub-30s calls, inherit from anchor call if not directly in arcadia
       CASE
         WHEN acf.talk_time_seconds <= 30 THEN
           CASE WHEN b_anchor.call_id IS NOT NULL THEN 'Arcadia' ELSE 'Atomizer' END
@@ -188,9 +186,14 @@ def get_data():
 
       COALESCE(obc.orders, 0)                                          AS orders,
       COALESCE(obc.gcv_fo, 0)                                          AS gcv_fo,
-
-      -- Change 3: cross_sell_rev column removed; total_revenue is gcv_fo only
       COALESCE(obc.gcv_fo, 0)                                          AS total_revenue,
+      obc.product_name                                                  AS product_name,
+      obc.partner_name                                                  AS partner_name,
+
+      CASE
+        WHEN obc.partner_name IN ('TXU Energy', 'TriEagle Energy', 'Octopus Energy') THEN 1
+        ELSE 0
+      END                                                               AS top_product_mix,
 
       acf.talk_time_seconds / 60.0                                     AS talk_time_minutes,
       CASE WHEN COALESCE(obc.orders, 0) > 0 THEN acf.talk_time_seconds / 60.0 END AS talk_time_minutes_sold,
@@ -199,17 +202,14 @@ def get_data():
       CASE
         WHEN acf.call_date_est <  DATE '2023-06-01' AND COALESCE(acf.total_points, 0) >= 28 THEN 1
         WHEN acf.call_date_est >= DATE '2023-06-01' AND COALESCE(acf.total_points, 0) >= 25 THEN 1
-        WHEN acf.call_date_est >  DATE '2023-10-09' AND COALESCE(obc.has_prepaid_12m, 0) = 1 THEN 1
         ELSE 0
       END                                                               AS tpsales_flag
 
     FROM acf_dedup acf
     LEFT JOIN b_member b
       ON b.call_id = acf.call_id
-    -- Join to resolve the anchor call_id for sub-30s calls
     LEFT JOIN short_call_anchor_id scai
       ON scai.short_call_id = acf.call_id
-    -- Check if the anchor call is in the arcadia table
     LEFT JOIN b_member b_anchor
       ON b_anchor.call_id = scai.anchor_call_id
     LEFT JOIN orders_by_call obc
@@ -236,14 +236,18 @@ def get_data():
 
 if __name__ == "__main__":
     df = get_data()
-    
+
     OUTPUT_DIR = "/Workspace/Users/fnisbet@redventures.com/arcadia-performance-dash/data/"
-    
+
+    # Clear all existing CSVs from the folder before writing new ones
+    for f in glob.glob(OUTPUT_DIR + "agent_calls_*.csv"):
+        os.remove(f)
+        print(f"Removed {f}")
+
     df["call_date_est"] = pd.to_datetime(df["call_date_est"])
-    
+
     for month, group in df.groupby(df["call_date_est"].dt.to_period("M")):
         filename = f"agent_calls_{month}.csv"
         path = OUTPUT_DIR + filename
         group.to_csv(path, index=False)
         print(f"Saved {len(group):,} rows to {path}")
-
