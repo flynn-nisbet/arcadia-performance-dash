@@ -115,6 +115,42 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
         )
 
 # ── Load data ──────────────────────────────────────────────────────────────────
+TEST_CENTER_LOCATIONS = {"unknown"}
+SOLD_PROVIDER_COLUMN = "sold_provider"
+SOLD_PROVIDER_MISSING_VALUES = {"", "(missing)", "missing", "nan", "none", "null", "<na>"}
+SOLD_PROVIDER_COL_CANDIDATES = (
+    "partner_name",
+    SOLD_PROVIDER_COLUMN,
+    "provider_name",
+    "provider",
+    "supplier_name",
+    "supplier",
+    "retailer_name",
+    "brand_name",
+    "utility_name",
+)
+
+
+def remove_test_center_locations(df: pd.DataFrame) -> pd.DataFrame:
+    if "center_location" not in df.columns:
+        return df
+    center = df["center_location"].astype(str).str.strip().str.lower()
+    return df.loc[~center.isin(TEST_CENTER_LOCATIONS)].copy()
+
+
+def normalize_sold_provider_column(df: pd.DataFrame) -> pd.DataFrame:
+    provider_col = next((c for c in SOLD_PROVIDER_COL_CANDIDATES if c in df.columns), None)
+    if provider_col is None:
+        df[SOLD_PROVIDER_COLUMN] = pd.NA
+    elif provider_col != SOLD_PROVIDER_COLUMN:
+        df[SOLD_PROVIDER_COLUMN] = df[provider_col]
+
+    provider = df[SOLD_PROVIDER_COLUMN].astype("string").str.strip()
+    provider_key = provider.str.lower()
+    df[SOLD_PROVIDER_COLUMN] = provider.mask(provider.isna() | provider_key.isin(SOLD_PROVIDER_MISSING_VALUES))
+    return df
+
+
 @st.cache_data(ttl="24h")
 def load_data():
     data_dir = "data/"
@@ -128,6 +164,8 @@ def load_data():
         dfs.append(pd.read_csv(os.path.join(data_dir, f)))
     
     df = pd.concat(dfs, ignore_index=True)
+    df = remove_test_center_locations(df)
+    df = normalize_sold_provider_column(df)
     df["call_date_est"] = pd.to_datetime(df["call_date_est"])
     if "call_type" in df.columns:
         df["call_type"] = df["call_type"].replace({"Permalease": "SERP", "Site Session": "Site"})
@@ -164,6 +202,13 @@ with st.sidebar:
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
     tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
     calltype_opts = sorted(df_raw["call_type"].dropna().unique().tolist()) if "call_type" in df_raw.columns else []
+    if SOLD_PROVIDER_COLUMN in df_raw.columns:
+        sold_provider_opts = sorted(
+            p for p in df_raw[SOLD_PROVIDER_COLUMN].dropna().unique().tolist()
+            if str(p).strip().lower() not in SOLD_PROVIDER_MISSING_VALUES
+        )
+    else:
+        sold_provider_opts = []
 
     sel_center         = st.multiselect("Center",           options=center_opts,         default=[], key="f_center")
     sel_brand_nonbrand = st.multiselect("Brand / Non-Brand", options=["Brand", "Non-Brand"], default=[], key="f_brand_nonbrand")
@@ -171,6 +216,16 @@ with st.sidebar:
     sel_mov            = st.multiselect("Mover / Switcher", options=mov_opts,            default=[], key="f_mov")
     sel_tenure         = st.multiselect("Tenure Bucket",    options=tenure_opts,         default=[], key="f_tenure")
     sel_calltype       = st.multiselect("Site/SERP",        options=calltype_opts,       default=[], key="f_calltype")
+    sel_sold_provider  = st.multiselect(
+        "Sold Partner",
+        options=sold_provider_opts,
+        default=[],
+        key="f_sold_provider",
+        help=(
+            "Applying this filter limits the dashboard to sold calls for the selected partner(s). "
+            "It is mainly useful for RPO and will not be useful for pre-sale analyses."
+        ),
+    )
 
     st.divider()
     _arcadia_theme_choice = theme.render_app_theme_toggle()
@@ -199,6 +254,11 @@ def apply_filters(base, use_date_range=True):
         d = d[d["marketing_bucket"].isin(implied)]
     if sel_mkt and "marketing_bucket" in d.columns:
         d = d[d["marketing_bucket"].isin(sel_mkt)]
+    if sel_sold_provider:
+        if SOLD_PROVIDER_COLUMN in d.columns:
+            d = d[d[SOLD_PROVIDER_COLUMN].isin(sel_sold_provider)]
+        else:
+            d = d.iloc[0:0]
     if sel_mov      and "moverSwitcher"    in d.columns: d = d[d["moverSwitcher"].isin(sel_mov)]
     if sel_tenure   and "tenure_bucket"    in d.columns: d = d[d["tenure_bucket"].isin(sel_tenure)]
     if sel_calltype and "call_type"        in d.columns: d = d[d["call_type"].isin(sel_calltype)]
@@ -739,6 +799,7 @@ with tab_overview:
             "Mover / Switcher": "moverSwitcher",
             "Tenure Bucket":    "tenure_bucket",
             "Call Type":        "call_type",
+            "Sold Partner":     SOLD_PROVIDER_COLUMN,
             "None (Overall)":   None,
         }
         ov_group_choice = st.selectbox(
@@ -780,8 +841,15 @@ with tab_overview:
             elif ov_metric_choice == "Total Revenue":
                 return orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
             elif fmt_ov == "dollar" and denom_col_ov:
-                num = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else 0
+                num = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
                 denom = top_funnel_call_count(grp) if denom_col_ov == "n_calls" else (orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0)
+                return safe_rate(num, denom)
+            elif ov_metric_choice == "Net Conversion":
+                num = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
+                return safe_rate(num, top_funnel_call_count(grp))
+            elif ov_metric_choice == "Top Product Mix":
+                num = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
+                denom = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
                 return safe_rate(num, denom)
             elif fmt_ov == "pct":
                 if num_col_ov not in inbound.columns:
@@ -911,7 +979,12 @@ with tab_overview:
             margin=dict(l=50, r=28, t=56, b=120),
             showlegend=False,
         )
-        st.plotly_chart(fig_ov_bar, use_container_width=True)
+        snapshot_chart_slot = st.empty()
+        snapshot_chart_slot.plotly_chart(
+            fig_ov_bar,
+            use_container_width=True,
+            key="ov_performance_snapshot_chart",
+        )
     else:
         st.info("No data available for trend chart.")
 
@@ -934,6 +1007,7 @@ with tab_volume:
         "Tenure Bucket": "tenure_bucket",
         "Site/SERP": "call_type",
         "Brand / Non-Brand": "_brand_nonbrand",
+        "Sold Partner": SOLD_PROVIDER_COLUMN,
     }
     # Funnel-step mix for the trend line chart (denominator = period total of that step).
     VOL_MIX_STEP_CHOICES = {
@@ -973,13 +1047,40 @@ with tab_volume:
             return pd.Series("(missing)", index=df.index)
         return _vol_topn_labels(df[dim_col], top_n)
 
+    def _vol_uses_sold_partner_dim(dim_col: str, dim2_col: str = "") -> bool:
+        return dim_col == SOLD_PROVIDER_COLUMN or dim2_col == SOLD_PROVIDER_COLUMN
+
+    def _vol_sold_partner_frame(base: pd.DataFrame) -> pd.DataFrame:
+        if base is None:
+            return pd.DataFrame()
+        if base.empty or SOLD_PROVIDER_COLUMN not in base.columns:
+            return base.iloc[0:0].copy()
+        provider = base[SOLD_PROVIDER_COLUMN].astype("string").str.strip()
+        provider_key = provider.str.lower()
+        provider_mask = provider.notna() & ~provider_key.isin(SOLD_PROVIDER_MISSING_VALUES)
+        if "orders" in base.columns:
+            sold_mask = base["orders"].fillna(0).gt(0)
+        else:
+            sold_mask = pd.Series(True, index=base.index)
+        return base.loc[provider_mask & sold_mask & order_revenue_mask(base)].copy()
+
     def _vol_funnel_step_mix_pivot(
-        v_in: pd.DataFrame, gran: str, dim_col: str, top_n: int, step: str, dim2_col: str = ""
+        base: pd.DataFrame, gran: str, dim_col: str, top_n: int, step: str, dim2_col: str = ""
     ) -> pd.DataFrame:
         """Wide volumes per period × category for ``step``; convert to mix % with row-wise totals."""
-        if v_in.empty or (dim_col not in v_in.columns and dim_col != "_brand_nonbrand"):
+        if base is None or base.empty or "call_date_est" not in base.columns:
             return pd.DataFrame()
-        w = v_in.copy()
+        if dim_col not in base.columns and dim_col != "_brand_nonbrand":
+            return pd.DataFrame()
+        out = base.dropna(subset=["call_date_est"]).copy()
+        if _vol_uses_sold_partner_dim(dim_col, dim2_col):
+            w = _vol_sold_partner_frame(out)
+        elif step == "sales":
+            w = out.loc[order_revenue_mask(out)].copy()
+        else:
+            w = out.loc[top_funnel_mask(out)].copy()
+        if w.empty:
+            return pd.DataFrame()
         w["period"] = period_labels(w["call_date_est"], gran)
         lbl1 = _get_vol_dim_labels(w, dim_col, top_n)
         if dim2_col:
@@ -1010,9 +1111,11 @@ with tab_volume:
     v_ts = _vol_inbound_frame(df)
     vol_cmp_base = apply_filters(df_raw.copy(), use_date_range=False)
     v_cmp_in = _vol_inbound_frame(vol_cmp_base)
+    v_sold_partner_ts = _vol_sold_partner_frame(df)
+    v_sold_partner_cmp = _vol_sold_partner_frame(vol_cmp_base)
 
-    if v_ts.empty and v_cmp_in.empty:
-        st.info("No inbound calls match the current filters.")
+    if v_ts.empty and v_cmp_in.empty and v_sold_partner_ts.empty and v_sold_partner_cmp.empty:
+        st.info("No inbound or sold partner calls match the current filters.")
     else:
         vc1, vc2, vc3, vc4 = st.columns([1, 1, 1, 1])
         with vc1:
@@ -1046,7 +1149,7 @@ with tab_volume:
             list(VOL_MIX_STEP_CHOICES.keys()),
             index=0,
             key="vol_funnel_mix_step",
-            help="Net Calls = inbound call counts. CiContact / CiCredit = sums of those flags by bucket. Sales = order counts by bucket. Each period’s lines show % of that step’s total attributed to each category.",
+            help="Net Calls = inbound call counts. CiContact / CiCredit = inbound flag sums by bucket. Sales = inbound + manual outbound order counts by bucket. If Sold Partner is selected as a mix dimension, all steps are limited to sold calls only.",
         )
         vol_mix_step = VOL_MIX_STEP_CHOICES[vol_mix_step_label]
 
@@ -1055,7 +1158,7 @@ with tab_volume:
         _dim_title = vol_dim_label if not vol_dim2_col else f"{vol_dim_label} × {vol_dim2_label}"
 
         # — Mix over time (sidebar date range): line chart by funnel step
-        pivot = _vol_funnel_step_mix_pivot(v_ts, vol_gran, vol_dim_col, vol_top_n, vol_mix_step, vol_dim2_col)
+        pivot = _vol_funnel_step_mix_pivot(df, vol_gran, vol_dim_col, vol_top_n, vol_mix_step, vol_dim2_col)
         if not pivot.empty:
             cats = list(pivot.columns)
             xdisp = pivot.index.strftime(PERIOD_FMT[vol_gran]).tolist()
@@ -1098,6 +1201,7 @@ with tab_volume:
         st.caption(
             "Ignores the sidebar **Date Range**; uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
             "Table: inbound **call mix** by category (top-N + Other) vs **Performance metric** per bucket. "
+            "When **Sold Partner** is a mix dimension, the mix and bucket metrics are limited to sold calls only. "
             "**Mix / rate / interaction / total impact** columns decompose **P2 − P1** in the selected metric using "
             "call-mix weights × bucket rates (percentage metrics in **ppt**). The four impacts **sum** to total change per row and overall."
         )
@@ -1176,6 +1280,10 @@ with tab_volume:
             def _vol_mix_counts(sub: pd.DataFrame) -> pd.Series:
                 if sub.empty or (vol_dim_col not in sub.columns and vol_dim_col != "_brand_nonbrand"):
                     return pd.Series(dtype=int)
+                if _vol_uses_sold_partner_dim(vol_dim_col, vol_dim2_col):
+                    sub = _vol_sold_partner_frame(sub)
+                    if sub.empty:
+                        return pd.Series(dtype=int)
                 lbl1 = _get_vol_dim_labels(sub, vol_dim_col, vol_top_n)
                 if vol_dim2_col:
                     lbl2 = _get_vol_dim_labels(sub, vol_dim2_col, vol_top_n)
@@ -1185,8 +1293,9 @@ with tab_volume:
                 return lbl.value_counts()
 
             if len(vol_cmp_range_1) == 2 and len(vol_cmp_range_2) == 2:
-                g1 = _vol_slice_period(v_cmp_in, vol_cmp_range_1)
-                g2 = _vol_slice_period(v_cmp_in, vol_cmp_range_2)
+                _vol_mix_base = vol_cmp_base if _vol_uses_sold_partner_dim(vol_dim_col, vol_dim2_col) else v_cmp_in
+                g1 = _vol_slice_period(_vol_mix_base, vol_cmp_range_1)
+                g2 = _vol_slice_period(_vol_mix_base, vol_cmp_range_2)
                 c1a, c1b = sorted([vol_cmp_range_1[0], vol_cmp_range_1[1]])
                 c2a, c2b = sorted([vol_cmp_range_2[0], vol_cmp_range_2[1]])
                 col1 = f"P1 ({c1a:%b %d, %Y} – {c1b:%b %d, %Y})"
@@ -1206,6 +1315,9 @@ with tab_volume:
 
                 g1_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_1)
                 g2_all = _vol_slice_period(vol_cmp_base, vol_cmp_range_2)
+                if _vol_uses_sold_partner_dim(vol_dim_col, vol_dim2_col):
+                    g1_all = _vol_sold_partner_frame(g1_all)
+                    g2_all = _vol_sold_partner_frame(g2_all)
                 _raw_m1, _raw_m2 = [], []
                 for cat in union_ix:
                     if (
@@ -1720,6 +1832,8 @@ with tab_lift:
                 st.stop()
 
         df = pd.concat(chunks, ignore_index=True)
+        df = remove_test_center_locations(df)
+        df = normalize_sold_provider_column(df)
         df["call_datetime_est"] = pd.to_datetime(df["call_datetime_est"])
         df["call_date_fo"]      = pd.to_datetime(df["call_date_fo"])
         for col in ["talk_time_minutes", "order_orders", "gcv_revenue", "ibcalls",
@@ -1796,6 +1910,11 @@ with tab_lift:
             df = df[df["call_type"].isin(sel_calltype)]
         if sel_tenure   and "tenure_bucket"    in df.columns:
             df = df[df["tenure_bucket"].isin(sel_tenure)]
+        if sel_sold_provider:
+            if SOLD_PROVIDER_COLUMN in df.columns:
+                df = df[df[SOLD_PROVIDER_COLUMN].isin(sel_sold_provider)]
+            else:
+                df = df.iloc[0:0]
         return df
 
     # Date filter for post rows: restrict to selected post date window.
