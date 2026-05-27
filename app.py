@@ -161,12 +161,16 @@ def load_data():
     
     dfs = []
     for f in sorted(files):
-        dfs.append(pd.read_csv(os.path.join(data_dir, f)))
+        dfs.append(pd.read_csv(os.path.join(data_dir, f), low_memory=False))
     
     df = pd.concat(dfs, ignore_index=True)
     df = remove_test_center_locations(df)
     df = normalize_sold_provider_column(df)
     df["call_date_est"] = pd.to_datetime(df["call_date_est"])
+    if "call_time_est" in df.columns:
+        df["call_time_est"] = pd.to_datetime(df["call_time_est"], errors="coerce")
+    if "brand_test" in df.columns:
+        df["brand_test"] = df["brand_test"].astype("string").str.strip().str.lower()
     if "call_type" in df.columns:
         df["call_type"] = df["call_type"].replace({"Permalease": "SERP", "Site Session": "Site"})
     return df
@@ -234,6 +238,11 @@ theme.inject_app_styles(light=_arcadia_theme_choice == "Light")
 
 # Brand bucket names — both spellings seen in production data
 BRAND_BUCKETS = {"Brand Partner", "Brand-Partner", "Competitor", "NRG"}
+BRAND_TEST_LAUNCH_AT = pd.Timestamp("2026-05-27 09:00:00")
+BRAND_TEST_VALUES = ("control", "test")
+BRAND_TEST_DISPLAY = {"control": "Control", "test": "Test"}
+BRAND_TEST_COL = "_brand_test_group"
+BRAND_TEST_DT_COL = "_brand_test_dt"
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
@@ -564,8 +573,9 @@ st.title("⚡ Arcadia Performance Dash")
 st.caption(f"{date_str}  ·  {top_funnel_call_count(df):,} inbound calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_overview, tab_volume, tab_agent, tab_lift = st.tabs([
+tab_overview, tab_brand, tab_volume, tab_agent, tab_lift = st.tabs([
     "Overview",
+    "Branded Flow Test",
     "Volume Shifts",
     "Agent Level",
     "Arcadia vs Atom",
@@ -987,6 +997,374 @@ with tab_overview:
         )
     else:
         st.info("No data available for trend chart.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB — BRANDED FLOW TEST
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_brand:
+    st.subheader("Branded Flow Test")
+    st.caption(
+        "Compares calls where **brand_test** is `control` vs `test`. "
+        "The sidebar Date Range is ignored; other sidebar filters still apply."
+    )
+
+    if "brand_test" not in df_raw.columns:
+        st.info("The loaded call data does not include a brand_test field.")
+    else:
+        brand_base = apply_filters(df_raw.copy(), use_date_range=False)
+
+        if "call_date_est" not in brand_base.columns or brand_base.empty:
+            st.info("No branded-flow data is available with the current filters.")
+        else:
+            brand_base = brand_base.dropna(subset=["call_date_est"]).copy()
+            brand_base[BRAND_TEST_COL] = (
+                brand_base["brand_test"].astype("string").str.strip().str.lower()
+            )
+            brand_base = brand_base[brand_base[BRAND_TEST_COL].isin(BRAND_TEST_VALUES)].copy()
+
+            if brand_base.empty:
+                st.info("No control/test branded-flow calls match the current filters.")
+            else:
+                if "call_time_est" in brand_base.columns:
+                    brand_base[BRAND_TEST_DT_COL] = pd.to_datetime(
+                        brand_base["call_time_est"], errors="coerce"
+                    )
+                    brand_has_time = brand_base["call_time_est"].notna().any()
+                else:
+                    brand_base[BRAND_TEST_DT_COL] = pd.NaT
+                    brand_has_time = False
+
+                brand_base[BRAND_TEST_DT_COL] = brand_base[BRAND_TEST_DT_COL].fillna(
+                    brand_base["call_date_est"]
+                )
+                launch_floor = (
+                    BRAND_TEST_LAUNCH_AT
+                    if brand_has_time
+                    else pd.Timestamp(BRAND_TEST_LAUNCH_AT.date())
+                )
+                brand_base = brand_base[brand_base[BRAND_TEST_DT_COL] >= launch_floor].copy()
+
+                if brand_base.empty:
+                    st.info("No control/test branded-flow calls are available since launch.")
+                else:
+                    max_brand_dt = brand_base[BRAND_TEST_DT_COL].max()
+                    min_brand_date = BRAND_TEST_LAUNCH_AT.date()
+                    max_brand_date = max_brand_dt.date()
+                    if max_brand_date < min_brand_date:
+                        max_brand_date = min_brand_date
+
+                    _BRAND_DATE_KEY = "brand_flow_date_range"
+                    _brand_default_range = (min_brand_date, max_brand_date)
+                    if _BRAND_DATE_KEY not in st.session_state:
+                        st.session_state[_BRAND_DATE_KEY] = _brand_default_range
+
+                    _brand_rv = st.session_state.get(_BRAND_DATE_KEY)
+                    if isinstance(_brand_rv, (tuple, list)) and len(_brand_rv) == 2:
+                        st.session_state[_BRAND_DATE_KEY] = cmp_date_range_clamp(
+                            min_brand_date,
+                            max_brand_date,
+                            tuple(_brand_rv),
+                            _brand_default_range,
+                        )
+
+                    brand_date_range = st.date_input(
+                        "Date Range",
+                        min_value=min_brand_date,
+                        max_value=max_brand_date,
+                        key=_BRAND_DATE_KEY,
+                        help=(
+                            "Defaults to launch: May 27, 2026 at 9:00 AM through "
+                            "the latest loaded branded-flow row."
+                        ),
+                    )
+                    st.caption(
+                        f"Default launch window: {BRAND_TEST_LAUNCH_AT:%b %d, %Y %I:%M %p} "
+                        f"through latest loaded branded-flow row ({max_brand_dt:%b %d, %Y %I:%M %p})."
+                    )
+
+                    def _slice_brand_dates(d_all: pd.DataFrame, dr):
+                        if len(dr) != 2:
+                            return d_all.iloc[0:0]
+                        a, b = dr[0], dr[1]
+                        if a > b:
+                            a, b = b, a
+                        start_at = pd.Timestamp(a)
+                        if a == BRAND_TEST_LAUNCH_AT.date():
+                            start_at = BRAND_TEST_LAUNCH_AT if brand_has_time else start_at
+                        start_at = max(start_at, launch_floor)
+                        end_exclusive = pd.Timestamp(b) + pd.Timedelta(days=1)
+                        m = (
+                            (d_all[BRAND_TEST_DT_COL] >= start_at) &
+                            (d_all[BRAND_TEST_DT_COL] < end_exclusive)
+                        )
+                        return d_all.loc[m].copy()
+
+                    if len(brand_date_range) != 2:
+                        st.info("Select a full start and end date for the branded-flow window.")
+                        brand_df = brand_base.iloc[0:0].copy()
+                    else:
+                        brand_df = _slice_brand_dates(brand_base, brand_date_range)
+
+                    if not brand_df.empty:
+                        control_df = brand_df[brand_df[BRAND_TEST_COL] == "control"]
+                        test_df = brand_df[brand_df[BRAND_TEST_COL] == "test"]
+
+                        kc1, kc2, kc3 = st.columns(3)
+                        kc1.metric("Control Calls", f"{top_funnel_call_count(control_df):,}")
+                        kc2.metric("Test Calls", f"{top_funnel_call_count(test_df):,}")
+                        kc3.metric("Total Calls", f"{top_funnel_call_count(brand_df):,}")
+
+                        st.divider()
+                        st.subheader("Control vs Test Funnel")
+
+                        brand_rows = []
+                        for metric, fmt in FUNNEL_METRICS:
+                            raw_control = compute_funnel_row(control_df, metric)
+                            raw_test = compute_funnel_row(test_df, metric)
+                            brand_rows.append(
+                                {
+                                    "Metric": metric,
+                                    "Control": fmt_funnel(raw_control, fmt),
+                                    "Test": fmt_funnel(raw_test, fmt),
+                                    "% Change (Test vs Control)": fmt_pct_change_str(
+                                        pct_change_vs_prior(raw_control, raw_test)
+                                    ),
+                                }
+                            )
+                        brand_table = pd.DataFrame(brand_rows)
+                        _brand_pch_col = "% Change (Test vs Control)"
+
+                        def _style_brand_funnel_row(row):
+                            out = pd.Series("", index=row.index)
+                            p = parse_display_pct(row[_brand_pch_col])
+                            if p is not None:
+                                out[_brand_pch_col] = theme.pct_change_cell_style(row["Metric"], p)
+                            return out
+
+                        st.dataframe(
+                            brand_table.style.apply(_style_brand_funnel_row, axis=1),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=dataframe_display_height(len(brand_table)),
+                        )
+                        table_export_row(brand_table, "branded_flow_test_funnel.csv")
+
+                        st.divider()
+                        st.subheader("Trend Over Time")
+
+                        bt_c1, bt_c2, bt_c3 = st.columns(3)
+                        with bt_c1:
+                            brand_gran = st.radio(
+                                "Granularity",
+                                PERIOD_OPTIONS,
+                                index=0,
+                                horizontal=True,
+                                key="brand_flow_granularity",
+                            )
+                        with bt_c2:
+                            brand_metric_choice = st.selectbox(
+                                "Metric",
+                                [
+                                    "Net Conversion", "Total Revenue", "Rev / Call", "Rev / Order",
+                                    "Top Product Mix", "Contact Rate", "Credit Rate",
+                                    "Passed Credit Rate", "Passed Credit Conv.", "Failed Credit Conv.",
+                                    "Talk Time", "Calls",
+                                ],
+                                key="brand_flow_metric",
+                            )
+                        with bt_c3:
+                            BRAND_GROUP_COL_MAP = {
+                                "Center":           "center_location",
+                                "Marketing Bucket": "marketing_bucket",
+                                "Mover / Switcher": "moverSwitcher",
+                                "Tenure Bucket":    "tenure_bucket",
+                                "Call Type":        "call_type",
+                                "Sold Partner":     SOLD_PROVIDER_COLUMN,
+                                "None (Overall)":   None,
+                            }
+                            brand_group_choice = st.selectbox(
+                                "Group By",
+                                options=list(BRAND_GROUP_COL_MAP.keys()),
+                                index=0,
+                                key="brand_flow_group",
+                            )
+                            brand_group_col = BRAND_GROUP_COL_MAP[brand_group_choice]
+
+                        BRAND_METRIC_MAP = {
+                            "Net Conversion":      ("orders",                    "n_calls",             "pct"),
+                            "Total Revenue":       ("total_revenue",              None,                  "dollar"),
+                            "Rev / Call":          ("total_revenue",              "n_calls",             "dollar"),
+                            "Rev / Order":         ("total_revenue",              "n_orders",            "dollar"),
+                            "Top Product Mix":     ("tpsales_flag",               "orders",              "pct"),
+                            "Contact Rate":        ("ib_contact_calls",           "n_calls",             "pct"),
+                            "Credit Rate":         ("credit_calls_flag",          "n_calls",             "pct"),
+                            "Passed Credit Rate":  ("passed_credit_call_flag",    "credit_calls_flag",   "pct"),
+                            "Passed Credit Conv.": ("passed_credit_sale_flag",    "passed_credit_call_flag", "pct"),
+                            "Failed Credit Conv.": ("failed_credit_sale_flag",    "failed_credit_call_flag", "pct"),
+                            "Talk Time":           ("talk_time_minutes",          None,                  "decimal"),
+                            "Calls":               (None,                         None,                  "count"),
+                        }
+                        num_col_bt, denom_col_bt, fmt_bt = BRAND_METRIC_MAP[brand_metric_choice]
+
+                        def agg_metric_brand(grp):
+                            inbound = grp[top_funnel_mask(grp)]
+                            orders_rev_rows = grp[order_revenue_mask(grp)]
+                            if brand_metric_choice == "Calls":
+                                return top_funnel_call_count(grp)
+                            elif brand_metric_choice == "Talk Time":
+                                return (
+                                    inbound["talk_time_minutes"].mean()
+                                    if "talk_time_minutes" in inbound.columns
+                                    else float("nan")
+                                )
+                            elif brand_metric_choice == "Total Revenue":
+                                return (
+                                    orders_rev_rows["total_revenue"].sum()
+                                    if "total_revenue" in orders_rev_rows.columns
+                                    else orders_rev_rows["gcv_fo"].sum()
+                                    if "gcv_fo" in orders_rev_rows.columns
+                                    else 0
+                                )
+                            elif fmt_bt == "dollar" and denom_col_bt:
+                                num = (
+                                    orders_rev_rows["total_revenue"].sum()
+                                    if "total_revenue" in orders_rev_rows.columns
+                                    else orders_rev_rows["gcv_fo"].sum()
+                                    if "gcv_fo" in orders_rev_rows.columns
+                                    else 0
+                                )
+                                denom = (
+                                    top_funnel_call_count(grp)
+                                    if denom_col_bt == "n_calls"
+                                    else (
+                                        orders_rev_rows["orders"].sum()
+                                        if "orders" in orders_rev_rows.columns
+                                        else 0
+                                    )
+                                )
+                                return safe_rate(num, denom)
+                            elif brand_metric_choice == "Net Conversion":
+                                num = (
+                                    orders_rev_rows["orders"].sum()
+                                    if "orders" in orders_rev_rows.columns
+                                    else 0
+                                )
+                                return safe_rate(num, top_funnel_call_count(grp))
+                            elif brand_metric_choice == "Top Product Mix":
+                                num = (
+                                    orders_rev_rows["tpsales_flag"].sum()
+                                    if "tpsales_flag" in orders_rev_rows.columns
+                                    else 0
+                                )
+                                denom = (
+                                    orders_rev_rows["orders"].sum()
+                                    if "orders" in orders_rev_rows.columns
+                                    else 0
+                                )
+                                return safe_rate(num, denom)
+                            elif fmt_bt == "pct":
+                                if num_col_bt not in inbound.columns:
+                                    return float("nan")
+                                num = inbound[num_col_bt].sum()
+                                if denom_col_bt == "n_calls":
+                                    denom = top_funnel_call_count(grp)
+                                elif denom_col_bt and denom_col_bt in inbound.columns:
+                                    denom = inbound[denom_col_bt].sum()
+                                else:
+                                    return float("nan")
+                                return safe_rate(num, denom)
+                            return float("nan")
+
+                        brand_ts = brand_df.dropna(subset=[BRAND_TEST_DT_COL]).copy()
+                        brand_ts["period"] = period_labels(brand_ts[BRAND_TEST_DT_COL], brand_gran)
+
+                        fig_brand_trend = go.Figure()
+                        _ax_brand = plotly_axis_lines()
+                        _muted_brand = chart_muted()
+                        _dash_by_test = {"control": "solid", "test": "dot"}
+                        _color_by_test = {"control": PLOT_COLORWAY[0], "test": PLOT_COLORWAY[1]}
+
+                        if brand_group_col and brand_group_col in brand_ts.columns:
+                            group_items = [
+                                (str(group_val), grp_c)
+                                for group_val, grp_c in brand_ts.dropna(subset=[brand_group_col]).groupby(brand_group_col)
+                            ]
+                        else:
+                            group_items = []
+
+                        def _add_brand_traces(label, source, color=None):
+                            for brand_value in BRAND_TEST_VALUES:
+                                sub = source[source[BRAND_TEST_COL] == brand_value]
+                                if sub.empty:
+                                    continue
+                                ts_c = (
+                                    sub.groupby("period")
+                                    .apply(agg_metric_brand)
+                                    .reset_index()
+                                    .rename(columns={0: "value"})
+                                )
+                                ts_c["period"] = pd.to_datetime(ts_c["period"])
+                                ts_c = ts_c.sort_values("period")
+                                trace_name = (
+                                    BRAND_TEST_DISPLAY[brand_value]
+                                    if label == "Overall" and not group_items
+                                    else f"{label} - {BRAND_TEST_DISPLAY[brand_value]}"
+                                )
+                                trace_color = color or _color_by_test[brand_value]
+                                fig_brand_trend.add_trace(
+                                    go.Scatter(
+                                        x=ts_c["period"],
+                                        y=ts_c["value"],
+                                        name=trace_name,
+                                        mode="lines+markers",
+                                        line=dict(
+                                            width=2,
+                                            dash=_dash_by_test[brand_value],
+                                            color=trace_color,
+                                        ),
+                                        marker=dict(size=5, color=trace_color),
+                                    )
+                                )
+
+                        for i, (group_label, group_df) in enumerate(group_items):
+                            _add_brand_traces(group_label, group_df, colorway_cycled(len(group_items))[i])
+
+                        _add_brand_traces("Overall", brand_ts, _muted_brand if group_items else None)
+
+                        if len(fig_brand_trend.data) == 0:
+                            st.info("No data available for the selected trend combination.")
+                        else:
+                            tick_vals = sorted(pd.to_datetime(brand_ts["period"].dropna().unique()).tolist())
+                            tick_text = [pd.Timestamp(x).strftime(PERIOD_FMT[brand_gran]) for x in tick_vals]
+
+                            if fmt_bt == "pct":
+                                y_fmt, y_prefix, y_suffix, y_title = ".1%", "", "", brand_metric_choice
+                            elif fmt_bt == "dollar":
+                                y_fmt, y_prefix, y_suffix, y_title = ",.0f", "$", "", brand_metric_choice
+                            elif brand_metric_choice == "Talk Time":
+                                y_fmt, y_prefix, y_suffix, y_title = ".2f", "", "", "Talk Time (Minutes)"
+                            else:
+                                y_fmt, y_prefix, y_suffix, y_title = ",.0f", "", "", brand_metric_choice
+
+                            _brand_title = (
+                                "Control vs Test - "
+                                f"{overview_chart_title(brand_metric_choice, brand_group_choice)}"
+                            )
+                            apply_chart_theme(
+                                fig_brand_trend,
+                                title=layout_chart_title(_brand_title),
+                                yaxis_tickformat=y_fmt,
+                                yaxis_tickprefix=y_prefix,
+                                yaxis_ticksuffix=y_suffix,
+                                yaxis_title=y_title,
+                                xaxis=dict(tickvals=tick_vals, ticktext=tick_text, **_ax_brand),
+                                height=420,
+                                margin=dict(l=50, r=20, t=48, b=76),
+                                legend=dict(orientation="h", y=-0.24),
+                            )
+                            st.plotly_chart(fig_brand_trend, use_container_width=True)
+                    else:
+                        st.info("No control/test branded-flow calls match the selected tab date range.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB — VOLUME SHIFTS (SECOND TAB): INBOUND MIX + CUSTOM-PERIOD MIX / METRIC BY BUCKET
