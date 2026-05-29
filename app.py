@@ -244,6 +244,26 @@ BRAND_TEST_DISPLAY = {"control": "Control", "test": "Test"}
 BRAND_TEST_COL = "_brand_test_group"
 BRAND_TEST_DT_COL = "_brand_test_dt"
 
+FMP_LAUNCH_AT = pd.Timestamp("2026-05-20 11:00:00")
+FMP_HINT_COL_CANDIDATES = ("site_experience_hint", "siteExperienceHint")
+FMP_HINT_PREFIX = "Find My Plan"
+FMP_DT_COL = "_fmp_dt"
+FMP_REC_TEXT_COL = "_fmp_recommended_text"
+FMP_REC_PROVIDER_COL = "_fmp_recommended_provider"
+FMP_REC_PLAN_COL = "_fmp_recommended_plan"
+FMP_RECOMMENDED_PROVIDER_PREFIXES = (
+    "Frontier Utilities",
+    "Discount Power",
+    "Rhythm Energy",
+    "Express Energy",
+    "4Change Energy",
+    "Gexa Energy",
+    "TXU Energy",
+    "Constellation",
+    "Reliant",
+    "APG&E",
+)
+
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
     d = base.copy()
@@ -310,6 +330,77 @@ def order_revenue_mask(d: pd.DataFrame) -> pd.Series:
 
 def top_funnel_call_count(d: pd.DataFrame) -> int:
     return int(top_funnel_mask(d).sum())
+
+
+def site_experience_hint_column(d: pd.DataFrame) -> str | None:
+    return next((c for c in FMP_HINT_COL_CANDIDATES if c in d.columns), None)
+
+
+def fmp_datetime_series(d: pd.DataFrame) -> tuple[pd.Series, bool]:
+    if "call_time_est" in d.columns:
+        call_ts = pd.to_datetime(d["call_time_est"], errors="coerce")
+        has_time = call_ts.notna().any()
+    else:
+        call_ts = pd.Series(pd.NaT, index=d.index)
+        has_time = False
+    if "call_date_est" in d.columns:
+        call_ts = call_ts.fillna(pd.to_datetime(d["call_date_est"], errors="coerce"))
+    return call_ts, has_time
+
+
+def normalize_fmp_recommendation_text(hints: pd.Series) -> pd.Series:
+    rec = hints.astype("string").str.extract(
+        r"(?i)\[?Find My Plan\]?:\s*Customer was recommended\s+(.*?),\s*but did not buy\.?",
+        expand=False,
+    )
+    return rec.astype("string").str.replace(r"\s+", " ", regex=True).str.strip()
+
+
+def add_fmp_recommendation_columns(d: pd.DataFrame, hint_col: str) -> pd.DataFrame:
+    out = d.copy()
+    out[FMP_REC_TEXT_COL] = normalize_fmp_recommendation_text(out[hint_col])
+
+    provider_prefixes = {p.strip() for p in FMP_RECOMMENDED_PROVIDER_PREFIXES if p.strip()}
+    if SOLD_PROVIDER_COLUMN in out.columns:
+        provider_prefixes |= {
+            str(p).strip()
+            for p in out[SOLD_PROVIDER_COLUMN].dropna().unique().tolist()
+            if str(p).strip()
+        }
+    provider_prefixes = sorted(provider_prefixes, key=len, reverse=True)
+
+    def _split_recommendation(rec):
+        if pd.isna(rec):
+            return pd.Series({FMP_REC_PROVIDER_COL: pd.NA, FMP_REC_PLAN_COL: pd.NA})
+        rec_s = str(rec).strip()
+        rec_key = rec_s.casefold()
+        for provider in provider_prefixes:
+            provider_s = str(provider).strip()
+            provider_key = provider_s.casefold()
+            if rec_key == provider_key:
+                return pd.Series({FMP_REC_PROVIDER_COL: provider_s, FMP_REC_PLAN_COL: ""})
+            if rec_key.startswith(f"{provider_key} "):
+                return pd.Series({
+                    FMP_REC_PROVIDER_COL: provider_s,
+                    FMP_REC_PLAN_COL: rec_s[len(provider_s):].strip(),
+                })
+        return pd.Series({FMP_REC_PROVIDER_COL: pd.NA, FMP_REC_PLAN_COL: rec_s})
+
+    split = out[FMP_REC_TEXT_COL].apply(_split_recommendation)
+    out[FMP_REC_PROVIDER_COL] = split[FMP_REC_PROVIDER_COL]
+    out[FMP_REC_PLAN_COL] = split[FMP_REC_PLAN_COL]
+    return out
+
+
+def normalize_plan_match_text(values: pd.Series) -> pd.Series:
+    return (
+        values
+        .astype("string")
+        .str.replace("\u00a0", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .str.lower()
+    )
 
 
 def cmp_date_range_sort(pair):
@@ -573,13 +664,19 @@ st.title("⚡ Arcadia Performance Dash")
 st.caption(f"{date_str}  ·  {top_funnel_call_count(df):,} inbound calls in view")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_overview, tab_brand, tab_volume, tab_agent, tab_lift = st.tabs([
+tab_overview, tab_volume, tab_agent, tab_current_tests, tab_lift = st.tabs([
     "Overview",
-    "Branded Flow Test",
     "Volume Shifts",
     "Agent Level",
+    "Current Tests",
     "Arcadia vs Atom",
 ])
+
+with tab_current_tests:
+    tab_brand, tab_fmp = st.tabs([
+        "Branded Flow Test",
+        "Find My Plan",
+    ])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB — OVERVIEW
@@ -1365,6 +1462,308 @@ with tab_brand:
                             st.plotly_chart(fig_brand_trend, use_container_width=True)
                     else:
                         st.info("No control/test branded-flow calls match the selected tab date range.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB — FIND MY PLAN
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_fmp:
+    st.subheader("Find My Plan")
+    st.caption(
+        "Uses the site experience hint launched May 20, 2026 around 11:00 AM EST. "
+        "The sidebar Date Range is ignored; other sidebar filters still apply."
+    )
+
+    fmp_hint_col = site_experience_hint_column(df_raw)
+
+    if fmp_hint_col is None:
+        st.info("The loaded call data does not include a site experience hint field.")
+    else:
+        fmp_base = apply_filters(df_raw.copy(), use_date_range=False)
+
+        if "call_date_est" not in fmp_base.columns or fmp_base.empty:
+            st.info("No Find My Plan data is available with the current filters.")
+        else:
+            fmp_base = fmp_base.dropna(subset=["call_date_est"]).copy()
+            fmp_base[FMP_DT_COL], fmp_has_time = fmp_datetime_series(fmp_base)
+            fmp_launch_floor = (
+                FMP_LAUNCH_AT
+                if fmp_has_time
+                else pd.Timestamp(FMP_LAUNCH_AT.date())
+            )
+            fmp_base = fmp_base[fmp_base[FMP_DT_COL] >= fmp_launch_floor].copy()
+
+            if fmp_base.empty:
+                st.info("No calls are available since the Find My Plan launch.")
+            else:
+                hint_text = fmp_base[fmp_hint_col].astype("string").fillna("")
+                fmp_df = fmp_base[
+                    hint_text.str.contains(FMP_HINT_PREFIX, case=False, na=False)
+                ].copy()
+                if not fmp_df.empty:
+                    fmp_df = add_fmp_recommendation_columns(fmp_df, fmp_hint_col)
+
+                latest_fmp_base_dt = fmp_base[FMP_DT_COL].max()
+                st.caption(
+                    f"Launch window: {FMP_LAUNCH_AT:%b %d, %Y %I:%M %p} "
+                    f"through latest loaded row ({latest_fmp_base_dt:%b %d, %Y %I:%M %p})."
+                )
+
+                fmp_orders_rows = fmp_df[order_revenue_mask(fmp_df)] if not fmp_df.empty else fmp_df
+                fmp_orders = (
+                    int(fmp_orders_rows["orders"].sum())
+                    if "orders" in fmp_orders_rows.columns
+                    else 0
+                )
+                fmp_sales_rows = (
+                    fmp_orders_rows[
+                        pd.to_numeric(fmp_orders_rows["orders"], errors="coerce")
+                        .fillna(0)
+                        .gt(0)
+                    ].copy()
+                    if "orders" in fmp_orders_rows.columns
+                    else fmp_orders_rows.iloc[0:0].copy()
+                )
+                fmp_same_plan_orders = 0
+                if (
+                    not fmp_sales_rows.empty
+                    and FMP_REC_PLAN_COL in fmp_sales_rows.columns
+                    and "product_name" in fmp_sales_rows.columns
+                    and "orders" in fmp_sales_rows.columns
+                ):
+                    rec_plan_key = normalize_plan_match_text(fmp_sales_rows[FMP_REC_PLAN_COL])
+                    sold_plan_key = normalize_plan_match_text(fmp_sales_rows["product_name"])
+                    same_plan_mask = (
+                        rec_plan_key.notna()
+                        & sold_plan_key.notna()
+                        & rec_plan_key.ne("")
+                        & rec_plan_key.eq(sold_plan_key)
+                    )
+                    fmp_same_plan_orders = int(
+                        pd.to_numeric(
+                            fmp_sales_rows.loc[same_plan_mask, "orders"],
+                            errors="coerce",
+                        ).fillna(0).sum()
+                    )
+                fmp_same_plan_rate = safe_rate(fmp_same_plan_orders, fmp_orders)
+                fmp_calls = top_funnel_call_count(fmp_df)
+                since_launch_calls = top_funnel_call_count(fmp_base)
+                fmp_rec_count = (
+                    fmp_df[FMP_REC_TEXT_COL].dropna().nunique()
+                    if FMP_REC_TEXT_COL in fmp_df.columns
+                    else 0
+                )
+
+                fk1, fk2, fk3, fk4, fk5, fk6 = st.columns(6)
+                fk1.metric("FMP Calls", f"{fmp_calls:,}")
+                fk2.metric(
+                    "FMP Share",
+                    f"{safe_rate(fmp_calls, since_launch_calls):.1%}"
+                    if since_launch_calls
+                    else "—",
+                )
+                fk3.metric("Orders", f"{fmp_orders:,}")
+                fk4.metric(
+                    "Net Conversion",
+                    f"{safe_rate(fmp_orders, fmp_calls):.1%}" if fmp_calls else "—",
+                )
+                fk5.metric("Recommendations", f"{fmp_rec_count:,}")
+                fk6.metric(
+                    "Same Plan Sales",
+                    f"{fmp_same_plan_rate:.1%}" if fmp_orders else "—",
+                    help=(
+                        "Share of FMP orders where the sold product_name matches "
+                        "the recommended plan parsed from the FMP hint."
+                    ),
+                )
+
+                st.divider()
+                st.subheader("FMP Funnel Since Launch")
+
+                if fmp_df.empty:
+                    st.info("No Find My Plan calls match the current filters.")
+                else:
+                    fmp_funnel_rows = []
+                    for metric, fmt in FUNNEL_METRICS:
+                        fmp_funnel_rows.append({
+                            "Metric": metric,
+                            "FMP Since Launch": fmt_funnel(
+                                compute_funnel_row(fmp_df, metric),
+                                fmt,
+                            ),
+                        })
+                    fmp_funnel_table = pd.DataFrame(fmp_funnel_rows)
+                    st.dataframe(
+                        fmp_funnel_table,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=dataframe_display_height(len(fmp_funnel_table)),
+                    )
+                    table_export_row(fmp_funnel_table, "find_my_plan_funnel.csv")
+
+                    st.divider()
+                    st.subheader("Recommended Plan Mix")
+
+                    fmp_mix_source = fmp_df.dropna(subset=[FMP_REC_TEXT_COL]).copy()
+                    if fmp_mix_source.empty:
+                        st.info("No parseable Find My Plan recommendations are available.")
+                    else:
+                        fmp_mix_source["Recommended Brand / Provider"] = (
+                            fmp_mix_source[FMP_REC_PROVIDER_COL]
+                            .astype("string")
+                            .fillna("Unparsed")
+                            .str.strip()
+                            .replace("", "Unparsed")
+                        )
+                        fmp_mix_source["Recommended Plan"] = (
+                            fmp_mix_source[FMP_REC_PLAN_COL]
+                            .astype("string")
+                            .fillna(fmp_mix_source[FMP_REC_TEXT_COL])
+                            .str.strip()
+                        )
+                        fmp_mix = (
+                            fmp_mix_source
+                            .groupby(["Recommended Brand / Provider", "Recommended Plan"], dropna=False)
+                            .size()
+                            .reset_index(name="FMP Calls")
+                        )
+                        fmp_mix["Share"] = fmp_mix["FMP Calls"] / fmp_mix["FMP Calls"].sum()
+                        fmp_mix["Recommended"] = np.where(
+                            fmp_mix["Recommended Brand / Provider"].eq("Unparsed"),
+                            fmp_mix["Recommended Plan"],
+                            fmp_mix["Recommended Brand / Provider"] + " - " + fmp_mix["Recommended Plan"],
+                        )
+                        fmp_mix = fmp_mix.sort_values(
+                            ["FMP Calls", "Recommended"],
+                            ascending=[False, True],
+                        )
+
+                        fmp_mix_plot = fmp_mix.sort_values(
+                            ["FMP Calls", "Recommended"],
+                            ascending=[True, False],
+                        )
+                        fig_fmp_mix = go.Figure(
+                            go.Bar(
+                                x=fmp_mix_plot["FMP Calls"],
+                                y=fmp_mix_plot["Recommended"],
+                                orientation="h",
+                                marker_color=colorway_cycled(len(fmp_mix_plot)),
+                                text=[
+                                    f"{calls:,} ({share:.1%})"
+                                    for calls, share in zip(
+                                        fmp_mix_plot["FMP Calls"],
+                                        fmp_mix_plot["Share"],
+                                    )
+                                ],
+                                textposition="outside",
+                                cliponaxis=False,
+                                hovertemplate=(
+                                    "%{y}<br>FMP calls: %{x:,}<br>"
+                                    "Mix: %{customdata:.1%}<extra></extra>"
+                                ),
+                                customdata=fmp_mix_plot["Share"],
+                            )
+                        )
+                        apply_chart_theme(
+                            fig_fmp_mix,
+                            title=layout_chart_title("FMP recommended plan mix"),
+                            xaxis=plotly_axis_extra("FMP calls", rangemode="tozero"),
+                            yaxis=plotly_axis_extra("Recommended brand / provider and plan", automargin=True),
+                            height=min(920, max(360, 240 + 28 * len(fmp_mix_plot))),
+                            margin=dict(l=52, r=110, t=52, b=52),
+                            showlegend=False,
+                        )
+                        st.plotly_chart(fig_fmp_mix, use_container_width=True)
+
+                    st.divider()
+                    st.subheader("FMP Calls")
+
+                    fmp_table = fmp_df.sort_values(FMP_DT_COL, ascending=False).copy()
+                    fmp_table["_display_call_time"] = pd.to_datetime(
+                        fmp_table[FMP_DT_COL],
+                        errors="coerce",
+                    ).dt.strftime("%b %d, %Y %I:%M %p")
+
+                    sold_mask = (
+                        fmp_table["orders"].fillna(0).astype(float).gt(0)
+                        if "orders" in fmp_table.columns
+                        else pd.Series(False, index=fmp_table.index)
+                    )
+                    fmp_table["_sold_provider_display"] = (
+                        fmp_table[SOLD_PROVIDER_COLUMN]
+                        if SOLD_PROVIDER_COLUMN in fmp_table.columns
+                        else pd.Series(pd.NA, index=fmp_table.index)
+                    )
+                    fmp_table["_sold_plan_display"] = (
+                        fmp_table["product_name"]
+                        if "product_name" in fmp_table.columns
+                        else pd.Series(pd.NA, index=fmp_table.index)
+                    )
+                    fmp_table.loc[~sold_mask, ["_sold_provider_display", "_sold_plan_display"]] = pd.NA
+
+                    fmp_table_cols = [
+                        ("_display_call_time", "Call Time"),
+                        ("call_id", "Call ID"),
+                        ("agent_name", "Agent"),
+                        ("center_location", "Center"),
+                        ("marketing_bucket", "Marketing Bucket"),
+                        ("moverSwitcher", "Mover / Switcher"),
+                        (FMP_REC_PROVIDER_COL, "Recommended Brand / Provider"),
+                        (FMP_REC_PLAN_COL, "Recommended Plan"),
+                        ("_sold_provider_display", "Sold Provider"),
+                        ("_sold_plan_display", "Sold Plan"),
+                        ("orders", "Orders"),
+                        ("total_revenue", "Revenue"),
+                        (fmp_hint_col, "Site Experience Hint"),
+                    ]
+                    display_cols = [
+                        (src, label)
+                        for src, label in fmp_table_cols
+                        if src in fmp_table.columns
+                    ]
+                    fmp_call_table = fmp_table[[src for src, _ in display_cols]].copy()
+                    fmp_call_table.columns = [label for _, label in display_cols]
+
+                    for col in [
+                        "Call Time",
+                        "Call ID",
+                        "Agent",
+                        "Center",
+                        "Marketing Bucket",
+                        "Mover / Switcher",
+                        "Recommended Brand / Provider",
+                        "Recommended Plan",
+                        "Sold Provider",
+                        "Sold Plan",
+                        "Site Experience Hint",
+                    ]:
+                        if col in fmp_call_table.columns:
+                            fmp_call_table[col] = (
+                                fmp_call_table[col]
+                                .astype("string")
+                                .str.strip()
+                                .replace({"": pd.NA, "<NA>": pd.NA})
+                                .fillna("—")
+                            )
+                    if "Orders" in fmp_call_table.columns:
+                        fmp_call_table["Orders"] = (
+                            pd.to_numeric(fmp_call_table["Orders"], errors="coerce")
+                            .fillna(0)
+                            .astype(int)
+                            .map(lambda x: f"{x:,}")
+                        )
+                    if "Revenue" in fmp_call_table.columns:
+                        fmp_call_table["Revenue"] = (
+                            pd.to_numeric(fmp_call_table["Revenue"], errors="coerce")
+                            .map(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
+                        )
+
+                    st.dataframe(
+                        fmp_call_table,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=dataframe_display_height(len(fmp_call_table), cap=2400),
+                    )
+                    table_export_row(fmp_call_table, "find_my_plan_calls.csv")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB — VOLUME SHIFTS (SECOND TAB): INBOUND MIX + CUSTOM-PERIOD MIX / METRIC BY BUCKET
