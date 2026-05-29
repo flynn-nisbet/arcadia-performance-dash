@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import json
-import os
+import re
 import hashlib
 from datetime import timedelta, date
+from pathlib import Path
 
 
 def report_through_date() -> date:
@@ -116,6 +117,7 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 TEST_CENTER_LOCATIONS = {"unknown"}
+DATA_DIR = Path("data")
 SOLD_PROVIDER_COLUMN = "sold_provider"
 SOLD_PROVIDER_MISSING_VALUES = {"", "(missing)", "missing", "nan", "none", "null", "<na>"}
 SOLD_PROVIDER_COL_CANDIDATES = (
@@ -151,18 +153,48 @@ def normalize_sold_provider_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def natural_path_sort_key(path: Path):
+    return [
+        int(part) if part.isdigit() else part
+        for part in re.split(r"(\d+)", path.as_posix().lower())
+    ]
+
+
+def discover_agent_call_files(data_dir: Path = DATA_DIR) -> list[Path]:
+    """Find agent-call CSV exports in old monthly files or new partitioned layouts."""
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    files = []
+    for path in data_dir.rglob("*.csv"):
+        rel_parts = path.relative_to(data_dir).parts
+        rel_parts_lc = [p.lower() for p in rel_parts]
+        filename_lc = path.name.lower()
+        in_agent_calls_dir = any(p.startswith("agent_calls") for p in rel_parts_lc[:-1])
+        is_agent_calls_file = filename_lc.startswith("agent_calls")
+        if is_agent_calls_file or in_agent_calls_dir:
+            files.append(path)
+
+    return sorted(set(files), key=natural_path_sort_key)
+
+
+def agent_call_file_manifest(files: list[Path]):
+    return tuple(
+        (
+            path.as_posix(),
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in files
+    )
+
+
 @st.cache_data(ttl="24h")
-def load_data():
-    data_dir = "data/"
-    files = [f for f in os.listdir(data_dir) if f.startswith("agent_calls_") and f.endswith(".csv")]
-    
-    if not files:
-        raise FileNotFoundError("No monthly CSV files found in data/")
-    
-    dfs = []
-    for f in sorted(files):
-        dfs.append(pd.read_csv(os.path.join(data_dir, f), low_memory=False))
-    
+def load_data(file_manifest):
+    files = [Path(path) for path, _, _ in file_manifest]
+
+    dfs = [pd.read_csv(path, low_memory=False) for path in files]
+
     df = pd.concat(dfs, ignore_index=True)
     df = remove_test_center_locations(df)
     df = normalize_sold_provider_column(df)
@@ -175,8 +207,20 @@ def load_data():
         df["call_type"] = df["call_type"].replace({"Permalease": "SERP", "Site Session": "Site"})
     return df
 
+
+def load_agent_call_data():
+    files = discover_agent_call_files()
+
+    if not files:
+        raise FileNotFoundError(
+            "No agent-call CSV files found in data/. Expected root files like "
+            "agent_calls_part1.csv or CSV parts inside data/agent_calls*/."
+        )
+
+    return load_data(agent_call_file_manifest(files))
+
 try:
-    df_raw = load_data()
+    df_raw = load_agent_call_data()
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
