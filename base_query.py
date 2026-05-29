@@ -217,8 +217,11 @@ def get_data():
           ELSE 0
         END                                                               AS tpsales_flag,
 
-        -- NEW: brand test assignment; null = not eligible (non-branded traffic)
-        bt.brand_test                                                     AS brand_test
+        -- brand test assignment; null = not eligible (non-branded traffic)
+        bt.brand_test                                                     AS brand_test,
+
+        -- NEW: site experience hint from compass_call_fct
+        ms.siteExperienceHint                                             AS site_experience_hint
 
       FROM acf_dedup acf
       LEFT JOIN b_member b
