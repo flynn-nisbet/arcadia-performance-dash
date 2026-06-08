@@ -3,6 +3,7 @@ from datetime import date
 import pandas as pd
 import os
 import glob
+import io
 
 def get_data():
     spark = DatabricksSession.builder \
@@ -54,7 +55,6 @@ def get_data():
         SELECT * FROM acf_base WHERE rn = 1
       ),
 
-      -- NEW: extract brand test assignment per call
       brand_test AS (
         SELECT
           call_context_call_id AS call_id,
@@ -64,6 +64,28 @@ def get_data():
           PARTITION BY call_context_call_id
           ORDER BY 1
         ) = 1
+      ),
+
+      ecp_module AS (
+        SELECT
+          callId AS call_id,
+          CASE
+            WHEN moduleNodeName = 'is_ecp'            THEN 'clicked_ecp'
+            WHEN moduleNodeName = 'mover_or_switcher' THEN 'clicked_mover_or_switcher'
+          END AS ecp_module_selection
+        FROM (
+          SELECT
+            callId,
+            moduleNodeName,
+            ROW_NUMBER() OVER (
+              PARTITION BY callId
+              ORDER BY _date ASC
+            ) AS rn
+          FROM lakehouse_production.energy.event_arcadia_elementviewed
+          WHERE _date >= (SELECT from_date_est FROM params)
+            AND moduleNodeName IN ('is_ecp', 'mover_or_switcher')
+        ) ranked
+        WHERE rn = 1
       ),
 
       short_call_anchor AS (
@@ -114,6 +136,16 @@ def get_data():
                 )
               ) >= (SELECT from_date_est FROM params)
         GROUP BY 1
+      ),
+
+      fmp_eligible AS (
+        SELECT DISTINCT v.call_id
+        FROM energy_prod.data_science.fmp_base_query fmp
+        JOIN energy_prod.energy.v_calls v
+          ON v.web_session_id = fmp.webcontext_session_id
+        WHERE fmp.experience       = 'FMP_LP'
+          AND fmp.top_match_name_1 IS NOT NULL
+          AND v.call_id            IS NOT NULL
       )
 
       SELECT
@@ -217,11 +249,10 @@ def get_data():
           ELSE 0
         END                                                               AS tpsales_flag,
 
-        -- brand test assignment; null = not eligible (non-branded traffic)
         bt.brand_test                                                     AS brand_test,
-
-        -- NEW: site experience hint from compass_call_fct
-        ms.siteExperienceHint                                             AS site_experience_hint
+        ms.siteExperienceHint                                             AS site_experience_hint,
+        em.ecp_module_selection                                           AS ecp_module_selection,
+        CASE WHEN fe.call_id IS NOT NULL THEN 1 ELSE 0 END                AS fmp_hint_eligible
 
       FROM acf_dedup acf
       LEFT JOIN b_member b
@@ -240,9 +271,12 @@ def get_data():
         ON cf.call_id = acf.call_id
       LEFT JOIN ai_products_prod.energy.compass_call_fct ms
         ON acf.call_id = ms.call_id
-      -- NEW: join brand test CTE
       LEFT JOIN brand_test bt
         ON bt.call_id = acf.call_id
+      LEFT JOIN ecp_module em
+        ON em.call_id = acf.call_id
+      LEFT JOIN fmp_eligible fe
+        ON fe.call_id = acf.call_id
 
       WHERE COALESCE(acf.agent_name, a.employee_name) NOT IN (
               'Harry Barcia', 'Diane Perez', 'Chris Curry', 'David Loughry'
@@ -255,20 +289,48 @@ def get_data():
     return spark.sql(query).toPandas()
 
 
+def deploy_app():
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.apps import AppDeployment
+
+    w = WorkspaceClient()
+    print("Deploying arcadia-performance-dash...")
+    deployment = w.apps.deploy(
+        app_name="arcadia-performance",
+        app_deployment=AppDeployment(
+            source_code_path="/Workspace/Users/fnisbet@redventures.com/arcadia-performance-dash"
+        )
+    )
+    print(f"Deploy complete: {deployment}")
+
+
 if __name__ == "__main__":
     df = get_data()
 
     OUTPUT_DIR = "/Workspace/Users/fnisbet@redventures.com/arcadia-performance-dash/data/"
 
-    # Clear all existing CSVs from the folder before writing new ones
     for f in glob.glob(OUTPUT_DIR + "agent_calls_*.csv"):
         os.remove(f)
         print(f"Removed {f}")
 
-    df["call_date_est"] = pd.to_datetime(df["call_date_est"])
+    TARGET_BYTES = 8 * 1024 * 1024
+    sample_size  = min(1000, len(df))
+    sample_bytes = len(df.head(sample_size).to_csv(index=False).encode("utf-8"))
+    bytes_per_row = sample_bytes / sample_size
+    rows_per_chunk = max(1, int(TARGET_BYTES / bytes_per_row))
 
-    for month, group in df.groupby(df["call_date_est"].dt.to_period("M")):
-        filename = f"agent_calls_{month}.csv"
+    print(f"Estimated {bytes_per_row:.0f} bytes/row → {rows_per_chunk:,} rows per chunk")
+
+    total_rows = len(df)
+    part = 1
+
+    for start in range(0, total_rows, rows_per_chunk):
+        chunk = df.iloc[start : start + rows_per_chunk]
+        filename = f"agent_calls_part{part}.csv"
         path = OUTPUT_DIR + filename
-        group.to_csv(path, index=False)
-        print(f"Saved {len(group):,} rows to {path}")
+        chunk.to_csv(path, index=False)
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        print(f"Saved {len(chunk):,} rows to {filename} ({size_mb:.1f} MB)")
+        part += 1
+
+    deploy_app()

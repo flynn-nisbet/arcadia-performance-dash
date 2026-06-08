@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as st_components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -8,11 +7,14 @@ import re
 import hashlib
 from datetime import timedelta, date
 from pathlib import Path
+import traceback
+import streamlit as st
 
-
-def report_through_date() -> date:
-    """Last full day included in date filters and WTD metrics (excludes unreliable intra-day 'today')."""
-    return date.today() - timedelta(days=1)
+def report_through_date(source: pd.DataFrame | None = None) -> date:
+    """Latest report date available, including current-day/intra-day rows."""
+    if source is not None and "call_date_est" in source.columns and source["call_date_est"].notna().any():
+        return source["call_date_est"].max().date()
+    return date.today()
 
 
 def monday_of_week_containing(d: date) -> date:
@@ -56,39 +58,65 @@ def dataframe_display_height(n_rows: int, min_rows: int = 4, row_px: int = 36, h
     return int(min(cap, header_px + row_px * n))
 
 
-def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_label: str = "Copy"):
-    """Renders download + copy actions (place below ``st.dataframe``). Copy button sized to match Streamlit download."""
+def streamlit_version_at_least(major: int, minor: int) -> bool:
+    parts = []
+    for part in str(getattr(st, "__version__", "0.0")).split(".")[:2]:
+        try:
+            parts.append(int(re.match(r"\d+", part).group(0)))
+        except (AttributeError, ValueError):
+            parts.append(0)
+    while len(parts) < 2:
+        parts.append(0)
+    return tuple(parts) >= (major, minor)
+
+
+def stretch_width_kwargs() -> dict:
+    if streamlit_version_at_least(1, 57):
+        return {"width": "stretch"}
+    return {"use_container_width": True}
+
+
+def render_copy_html(html: str, height: int) -> None:
+    if streamlit_version_at_least(1, 57) and hasattr(st, "iframe"):
+        st.iframe(html, height=height, **stretch_width_kwargs())
+    else:
+        import streamlit.components.v1 as components
+        components.html(html, height=height)
+
+
+def table_export_row(
+    display_df: pd.DataFrame,
+    download_filename: str,
+    copy_label: str = "Copy",
+    *,
+    key_suffix: str = "",
+) -> None:
+    """Renders a compact copy action below a table."""
     tsv = display_df.to_csv(index=False, sep="\t")
-    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
-    uid = hashlib.md5(download_filename.encode(), usedforsecurity=False).hexdigest()[:12]
-    b1, b2 = st.columns([1, 1])
-    with b1:
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name=download_filename,
-            mime="text/csv",
-            key=f"dl_{uid}",
-        )
-    with b2:
+    uid = hashlib.md5((download_filename + "\0" + key_suffix).encode(), usedforsecurity=False).hexdigest()[:12]
+    copy_bg = "#f8fafc" if theme.is_light_theme() else "#181c25"
+    copy_text = "#475569" if theme.is_light_theme() else "#8b95aa"
+    copy_border = "#cbd5e1" if theme.is_light_theme() else "#2e3649"
+    copy_col, _spacer = st.columns([0.65, 6.35])
+    with copy_col:
         tsv_literal = json.dumps(tsv)
         lbl_literal = json.dumps(copy_label)
-        st_components.html(
+        render_copy_html(
             f"""<div style="font-family:DM Sans,sans-serif;padding:0;margin:0;">
 <button type="button" id="cpbtn_{uid}"
-  style="background:#3d8ef8;color:#fff;border:none;border-radius:0.5rem;box-sizing:border-box;
-  width:100%;min-height:2.625rem;height:2.625rem;padding:0 1.25rem;font-size:0.875rem;font-weight:600;
-  line-height:1.2;cursor:pointer;display:flex;align-items:center;justify-content:center;">{copy_label}</button>
+style="background:{copy_bg};color:{copy_text};border:1px solid {copy_border};border-radius:999px;box-sizing:border-box;
+width:100%;min-height:2.25rem;height:2.25rem;padding:0 0.85rem;font-size:0.78rem;font-weight:500;
+line-height:1.2;cursor:pointer;display:flex;align-items:center;justify-content:center;">{copy_label}</button>
 </div>
 <script>
 (function() {{
-  var text = {tsv_literal};
-  var orig = {lbl_literal};
-  var b = document.getElementById("cpbtn_{uid}");
-  if (!b) return;
-  b.addEventListener("click", function() {{
+var text = {tsv_literal};
+var orig = {lbl_literal};
+var b = document.getElementById("cpbtn_{uid}");
+if (!b) return;
+b.addEventListener("click", function() {{
     function fallbackCopy() {{
-      try {{
+    try {{
         var ta = document.createElement("textarea");
         ta.value = text;
         ta.setAttribute("readonly", "");
@@ -100,16 +128,16 @@ def table_export_row(display_df: pd.DataFrame, download_filename: str, copy_labe
         ta.setSelectionRange(0, 999999);
         document.execCommand("copy");
         document.body.removeChild(ta);
-      }} catch (e) {{}}
+    }} catch (e) {{}}
     }}
     if (navigator.clipboard && window.isSecureContext) {{
-      navigator.clipboard.writeText(text).catch(fallbackCopy);
+    navigator.clipboard.writeText(text).catch(fallbackCopy);
     }} else {{
-      fallbackCopy();
+    fallbackCopy();
     }}
     b.textContent = "Copied";
     setTimeout(function() {{ b.textContent = orig; }}, 1600);
-  }});
+}});
 }})();
 </script>""",
             height=52,
@@ -225,13 +253,16 @@ except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
 
+PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly"]
+PERIOD_CODE    = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
+PERIOD_FMT     = {"Daily": "%b %d", "Weekly": "%b %d", "Monthly": "%b %Y"}
+
 # ── Sidebar Filters ────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Filters")
 
     min_d = df_raw["call_date_est"].min().date()
-    max_d_data = df_raw["call_date_est"].max().date()
-    max_d = min(max_d_data, report_through_date())
+    max_d = df_raw["call_date_est"].max().date()
     if max_d < min_d:
         max_d = min_d
     default_start = max(min_d, max_d - timedelta(days=6))
@@ -246,6 +277,10 @@ with st.sidebar:
 
     center_opts   = sorted(df_raw["center_location"].dropna().unique().tolist()) if "center_location" in df_raw.columns else []
     center_opts   = [c for c in center_opts if c != "Z - Default Location"]
+    default_centers = [c for c in ("Durban", "Jamaica") if c in center_opts]
+    if "_default_center_selection_applied" not in st.session_state:
+        st.session_state["f_center"] = default_centers
+        st.session_state["_default_center_selection_applied"] = True
     mkt_opts      = sorted(df_raw["marketing_bucket"].dropna().unique().tolist()) if "marketing_bucket" in df_raw.columns else []
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
     tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
@@ -258,7 +293,8 @@ with st.sidebar:
     else:
         sold_provider_opts = []
 
-    sel_center         = st.multiselect("Center",           options=center_opts,         default=[], key="f_center")
+    time_granularity   = st.selectbox("Time Granularity", PERIOD_OPTIONS, index=0, key="time_granularity")
+    sel_center         = st.multiselect("Center",           options=center_opts,         key="f_center")
     sel_brand_nonbrand = st.multiselect("Brand / Non-Brand", options=["Brand", "Non-Brand"], default=[], key="f_brand_nonbrand")
     sel_mkt            = st.multiselect("Marketing Bucket", options=mkt_opts,            default=[], key="f_mkt")
     sel_mov            = st.multiselect("Mover / Switcher", options=mov_opts,            default=[], key="f_mov")
@@ -287,6 +323,13 @@ BRAND_TEST_VALUES = ("control", "test")
 BRAND_TEST_DISPLAY = {"control": "Control", "test": "Test"}
 BRAND_TEST_COL = "_brand_test_group"
 BRAND_TEST_DT_COL = "_brand_test_dt"
+ECP_MODULE_SELECTION_COL = "ecp_module_selection"
+ECP_MODULE_SELECTION_CLEAN_COL = "_ecp_module_selection_clean"
+ECP_MODULE_SELECTION_MISSING_VALUES = {"", "nan", "none", "null", "<na>"}
+ECP_MODULE_SELECTION_DISPLAY = {
+    "clicked_ecp": "Clicked ECP",
+    "clicked_mover_or_switcher": "Clicked Mover / Switcher",
+}
 
 FMP_LAUNCH_AT = pd.Timestamp("2026-05-20 11:00:00")
 FMP_HINT_COL_CANDIDATES = ("site_experience_hint", "siteExperienceHint")
@@ -340,10 +383,6 @@ def apply_filters(base, use_date_range=True):
 df = apply_filters(df_raw)
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
-PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly"]
-PERIOD_CODE    = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
-PERIOD_FMT     = {"Daily": "%b %d", "Weekly": "%b %d", "Monthly": "%b %Y"}
-
 def period_labels(date_series, period):
     code = PERIOD_CODE[period]
     pr = pd.DatetimeIndex(date_series).to_period(code)
@@ -374,6 +413,27 @@ def order_revenue_mask(d: pd.DataFrame) -> pd.Series:
 
 def top_funnel_call_count(d: pd.DataFrame) -> int:
     return int(top_funnel_mask(d).sum())
+
+
+def clean_ecp_module_selection(d: pd.DataFrame) -> pd.Series:
+    if ECP_MODULE_SELECTION_COL not in d.columns:
+        return pd.Series(pd.NA, index=d.index, dtype="string")
+    values = d[ECP_MODULE_SELECTION_COL].astype("string").str.strip()
+    missing = (
+        values.isna()
+        | values.str.lower().isin(ECP_MODULE_SELECTION_MISSING_VALUES)
+    )
+    return values.mask(missing, pd.NA)
+
+
+def display_ecp_module_selection(value) -> str:
+    if pd.isna(value):
+        return "—"
+    value_s = str(value).strip()
+    return ECP_MODULE_SELECTION_DISPLAY.get(
+        value_s,
+        re.sub(r"[_-]+", " ", value_s).title(),
+    )
 
 
 def site_experience_hint_column(d: pd.DataFrame) -> str | None:
@@ -481,7 +541,7 @@ def parse_display_pct(val):
 
 
 def wtd_vs_four_week_pooled(source, metric_fn):
-    """Partial Mon–Sun week through ``report_through_date()`` vs P4WA on one pooled window.
+    """Partial Mon–Sun week through the latest available date vs P4WA on one pooled window.
 
     P4WA is computed on **all calls in the four prior full Mon–Sun weeks** (same calendar span as
     four separate weeks), then the metric function runs once on that combined slice — e.g. Rev/Call
@@ -492,7 +552,7 @@ def wtd_vs_four_week_pooled(source, metric_fn):
     tmp = source.dropna(subset=["call_date_est"]).copy()
     if tmp.empty:
         return None, None
-    as_of = report_through_date()
+    as_of = report_through_date(tmp)
     week_start = monday_of_week_containing(as_of)
 
     def _slice(d0: date, d1: date):
@@ -704,8 +764,9 @@ if df["call_date_est"].notna().any():
     mx = df["call_date_est"].max().strftime("%b %d, %Y")
     date_str = f"{mn} – {mx}"
 
-st.title("⚡ Arcadia Performance Dash")
-st.caption(f"{date_str}  ·  {top_funnel_call_count(df):,} inbound calls in view")
+title_help = f"{date_str} · {top_funnel_call_count(df):,} inbound calls in view"
+st.title("⚡ Arcadia Performance Dash", help=title_help)
+st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab_overview, tab_volume, tab_agent, tab_current_tests, tab_lift = st.tabs([
@@ -730,15 +791,17 @@ with tab_overview:
     # One filtered frame without sidebar date range (WTD KPIs + custom period comparison share it).
     _df_no_dr = apply_filters(df_raw.copy(), use_date_range=False)
 
-    # ── Top KPI row — partial Mon–Sun week (through yesterday) vs pooled P4WA, ignores date filter ─
-    st.subheader("Performance So Far This Week")
-    _wtd_asof = report_through_date()
+    # ── Top KPI row — partial Mon–Sun week through latest data vs pooled P4WA, ignores date filter ─
+    _wtd_asof = report_through_date(_df_no_dr)
     _wtd_ws = monday_of_week_containing(_wtd_asof)
-    st.caption(
-        "Mon–Sun calendar weeks · partial current week (through yesterday) vs **P4WA** (same KPIs computed on "
-        "all calls in the **four prior full Mon–Sun weeks** together — pooled, not a weekly average) · "
-        "ignores date filter · Center and other sidebar filters apply. "
-        f"Comparison dates: {_wtd_ws:%b %d}–{_wtd_asof:%b %d} vs P4WA."
+    st.subheader(
+        "Performance So Far This Week",
+        help=(
+            "Mon–Sun calendar weeks · partial current week through latest loaded data vs **P4WA** "
+            "(same KPIs computed on all calls in the **four prior full Mon–Sun weeks** together — pooled, "
+            "not a weekly average) · ignores date filter · Center and other sidebar filters apply. "
+            f"Comparison dates: {_wtd_ws:%b %d}–{_wtd_asof:%b %d} vs P4WA."
+        ),
     )
 
     def _wk_raw(fn):
@@ -783,9 +846,7 @@ with tab_overview:
     # ── Funnel table ───────────────────────────────────────────────────────────
     st.subheader("Funnel Over Time")
 
-    ov_gran = st.radio(
-        "Granularity", PERIOD_OPTIONS, index=0, horizontal=True, key="overview_gran"
-    )
+    ov_gran = time_granularity
 
     if "call_date_est" in df.columns and len(df) > 0:
         ft_df = df.dropna(subset=["call_date_est"]).copy()
@@ -806,7 +867,7 @@ with tab_overview:
         funnel_table = pd.DataFrame(funnel_rows)
         st.dataframe(
             funnel_table,
-            use_container_width=True,
+            **stretch_width_kwargs(),
             hide_index=True,
             height=dataframe_display_height(len(funnel_table)),
         )
@@ -814,17 +875,22 @@ with tab_overview:
     else:
         st.info("No data available.")
 
+    overview_visuals_container = st.container()
+    st.divider()
+
     # ── Custom period comparison (ignores sidebar date filter) ─────────────────
-    st.subheader("Custom Period Comparison")
-    st.caption(
-        "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
-        "Each period is one aggregate over its date window (same metrics as the funnel table)."
+    st.subheader(
+        "Custom Period Comparison",
+        help=(
+            "Ignores the sidebar **Date Range**. Uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
+            "Each period is one aggregate over its date window (same metrics as the funnel table)."
+        ),
     )
     df_cmp = _df_no_dr
     if "call_date_est" in df_cmp.columns and len(df_cmp) > 0:
         _cmp_min = df_cmp["call_date_est"].min().date()
         _cmp_max = df_cmp["call_date_est"].max().date()
-        _cmp_cap = min(_cmp_max, report_through_date())
+        _cmp_cap = _cmp_max
         if _cmp_cap < _cmp_min:
             _cmp_cap = _cmp_min
         _w = timedelta(days=6)
@@ -918,7 +984,7 @@ with tab_overview:
             cmp_styler = cmp_table.style.apply(_style_cmp_row, axis=1)
             st.dataframe(
                 cmp_styler,
-                use_container_width=True,
+                **stretch_width_kwargs(),
                 hide_index=True,
                 height=dataframe_display_height(len(cmp_table)),
             )
@@ -928,19 +994,19 @@ with tab_overview:
     else:
         st.info("No data available for period comparison with current filters.")
 
-    st.divider()
+    overview_visuals_container.divider()
 
     # ── Trend chart — shares granularity with funnel table ────────────────────
-    st.subheader("Trend Over Time")
+    overview_visuals_container.subheader("Trend Over Time")
 
-    tr_c1, tr_c2 = st.columns(2)
+    tr_c1, tr_c2 = overview_visuals_container.columns(2)
     with tr_c1:
         ov_metric_choice = st.selectbox(
             "Metric",
             ["Net Conversion", "Total Revenue", "Rev / Call", "Rev / Order",
-             "Top Product Mix", "Contact Rate", "Credit Rate",
-             "Passed Credit Rate", "Passed Credit Conv.", "Failed Credit Conv.",
-             "Talk Time", "Calls"],
+            "Top Product Mix", "Contact Rate", "Credit Rate",
+            "Passed Credit Rate", "Passed Credit Conv.", "Failed Credit Conv.",
+            "Talk Time", "Calls"],
             key="ov_trend_metric",
         )
     with tr_c2:
@@ -1077,13 +1143,13 @@ with tab_overview:
             margin=dict(l=50, r=20, t=48, b=40),
             legend=dict(orientation="h", y=-0.2),
         )
-        st.plotly_chart(fig_ov_trend, use_container_width=True)
+        overview_visuals_container.plotly_chart(fig_ov_trend, **stretch_width_kwargs())
 
         # ── Performance snapshot (bar) — same metric / group as trend ───────────
-        st.divider()
-        st.subheader("Performance Snapshot")
-        st.caption(
-            "Same metric and group by as above · one value per category for the full filtered date range."
+        overview_visuals_container.divider()
+        overview_visuals_container.subheader(
+            "Performance Snapshot",
+            help="Same metric and group by as above · one value per category for the full filtered date range.",
         )
         _snap_title = overview_chart_title(ov_metric_choice, ov_group_choice)
 
@@ -1130,23 +1196,25 @@ with tab_overview:
             margin=dict(l=50, r=28, t=56, b=120),
             showlegend=False,
         )
-        snapshot_chart_slot = st.empty()
+        snapshot_chart_slot = overview_visuals_container.empty()
         snapshot_chart_slot.plotly_chart(
             fig_ov_bar,
-            use_container_width=True,
+            **stretch_width_kwargs(),
             key="ov_performance_snapshot_chart",
         )
     else:
-        st.info("No data available for trend chart.")
+        overview_visuals_container.info("No data available for trend chart.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB — BRANDED FLOW TEST
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_brand:
-    st.subheader("Branded Flow Test")
-    st.caption(
-        "Compares calls where **brand_test** is `control` vs `test`. "
-        "The sidebar Date Range is ignored; other sidebar filters still apply."
+    st.subheader(
+        "Branded Flow Test",
+        help=(
+            "Compares calls where **brand_test** is `control` vs `test`. "
+            "The sidebar Date Range is ignored; other sidebar filters still apply."
+        ),
     )
 
     if "brand_test" not in df_raw.columns:
@@ -1215,12 +1283,10 @@ with tab_brand:
                         key=_BRAND_DATE_KEY,
                         help=(
                             "Defaults to launch: May 27, 2026 at 9:00 AM through "
-                            "the latest loaded branded-flow row."
+                            "the latest loaded branded-flow row. "
+                            f"Current default launch window: {BRAND_TEST_LAUNCH_AT:%b %d, %Y %I:%M %p} "
+                            f"through latest loaded branded-flow row ({max_brand_dt:%b %d, %Y %I:%M %p})."
                         ),
-                    )
-                    st.caption(
-                        f"Default launch window: {BRAND_TEST_LAUNCH_AT:%b %d, %Y %I:%M %p} "
-                        f"through latest loaded branded-flow row ({max_brand_dt:%b %d, %Y %I:%M %p})."
                     )
 
                     def _slice_brand_dates(d_all: pd.DataFrame, dr):
@@ -1284,7 +1350,7 @@ with tab_brand:
 
                         st.dataframe(
                             brand_table.style.apply(_style_brand_funnel_row, axis=1),
-                            use_container_width=True,
+                            **stretch_width_kwargs(),
                             hide_index=True,
                             height=dataframe_display_height(len(brand_table)),
                         )
@@ -1293,16 +1359,9 @@ with tab_brand:
                         st.divider()
                         st.subheader("Trend Over Time")
 
-                        bt_c1, bt_c2, bt_c3 = st.columns(3)
+                        brand_gran = time_granularity
+                        bt_c1, bt_c2 = st.columns(2)
                         with bt_c1:
-                            brand_gran = st.radio(
-                                "Granularity",
-                                PERIOD_OPTIONS,
-                                index=0,
-                                horizontal=True,
-                                key="brand_flow_granularity",
-                            )
-                        with bt_c2:
                             brand_metric_choice = st.selectbox(
                                 "Metric",
                                 [
@@ -1313,7 +1372,7 @@ with tab_brand:
                                 ],
                                 key="brand_flow_metric",
                             )
-                        with bt_c3:
+                        with bt_c2:
                             BRAND_GROUP_COL_MAP = {
                                 "Center":           "center_location",
                                 "Marketing Bucket": "marketing_bucket",
@@ -1503,7 +1562,129 @@ with tab_brand:
                                 margin=dict(l=50, r=20, t=48, b=76),
                                 legend=dict(orientation="h", y=-0.24),
                             )
-                            st.plotly_chart(fig_brand_trend, use_container_width=True)
+                            st.plotly_chart(fig_brand_trend, **stretch_width_kwargs())
+
+                        st.divider()
+                        st.subheader(
+                            "ECP Module Funnel",
+                            help=(
+                                "`ecp_module_selection` tracks whether someone clicked anything in the new experience, "
+                                "then which module they selected."
+                            ),
+                        )
+
+                        if ECP_MODULE_SELECTION_COL not in brand_df.columns:
+                            st.info("The loaded call data does not include an ecp_module_selection field.")
+                        else:
+                            module_df = brand_df[top_funnel_mask(brand_df)].copy()
+                            module_df[ECP_MODULE_SELECTION_CLEAN_COL] = clean_ecp_module_selection(module_df)
+                            module_df["_ecp_interacted"] = module_df[ECP_MODULE_SELECTION_CLEAN_COL].notna()
+
+                            side_totals = {}
+                            side_interacted = {}
+                            for brand_value in BRAND_TEST_VALUES:
+                                side_df = module_df[module_df[BRAND_TEST_COL] == brand_value]
+                                side_totals[brand_value] = len(side_df)
+                                side_interacted[brand_value] = int(side_df["_ecp_interacted"].sum())
+
+                            def _fmt_module_cell(count, rate=None):
+                                if rate is None:
+                                    return f"{count:,}"
+                                return f"{count:,} ({rate:.1%})" if pd.notna(rate) else f"{count:,} (—)"
+
+                            def _fmt_module_pct_change(control_value, test_value):
+                                return fmt_pct_change_str(pct_change_vs_prior(control_value, test_value))
+
+                            control_clicked_rate = safe_rate(
+                                side_interacted["control"],
+                                side_totals["control"],
+                            )
+                            test_clicked_rate = safe_rate(
+                                side_interacted["test"],
+                                side_totals["test"],
+                            )
+                            module_funnel_rows = [
+                                {
+                                    "Step": "All People",
+                                    "Control": _fmt_module_cell(side_totals["control"]),
+                                    "Test": _fmt_module_cell(side_totals["test"]),
+                                    "% Change": _fmt_module_pct_change(
+                                        side_totals["control"],
+                                        side_totals["test"],
+                                    ),
+                                },
+                                {
+                                    "Step": "Clicked Anything",
+                                    "Control": _fmt_module_cell(
+                                        side_interacted["control"],
+                                        control_clicked_rate,
+                                    ),
+                                    "Test": _fmt_module_cell(
+                                        side_interacted["test"],
+                                        test_clicked_rate,
+                                    ),
+                                    "% Change": _fmt_module_pct_change(
+                                        control_clicked_rate,
+                                        test_clicked_rate,
+                                    ),
+                                },
+                            ]
+
+                            interacted_module_df = module_df[module_df["_ecp_interacted"]].copy()
+                            if not interacted_module_df.empty:
+                                response_order = (
+                                    interacted_module_df[ECP_MODULE_SELECTION_CLEAN_COL]
+                                    .map(display_ecp_module_selection)
+                                    .value_counts()
+                                    .index
+                                    .tolist()
+                                )
+                                for response in response_order:
+                                    response_counts = {}
+                                    response_rates = {}
+                                    for brand_value in BRAND_TEST_VALUES:
+                                        side_response_count = int(
+                                            (
+                                                (interacted_module_df[BRAND_TEST_COL] == brand_value)
+                                                & (
+                                                    interacted_module_df[ECP_MODULE_SELECTION_CLEAN_COL]
+                                                    .map(display_ecp_module_selection)
+                                                    == response
+                                                )
+                                            ).sum()
+                                        )
+                                        response_counts[brand_value] = side_response_count
+                                        response_rates[brand_value] = safe_rate(
+                                            side_response_count,
+                                            side_interacted[brand_value],
+                                        )
+
+                                    module_funnel_rows.append(
+                                        {
+                                            "Step": response,
+                                            "Control": _fmt_module_cell(
+                                                response_counts["control"],
+                                                response_rates["control"],
+                                            ),
+                                            "Test": _fmt_module_cell(
+                                                response_counts["test"],
+                                                response_rates["test"],
+                                            ),
+                                            "% Change": _fmt_module_pct_change(
+                                                response_rates["control"],
+                                                response_rates["test"],
+                                            ),
+                                        }
+                                    )
+
+                            module_funnel_table = pd.DataFrame(module_funnel_rows)
+                            st.dataframe(
+                                module_funnel_table,
+                                **stretch_width_kwargs(),
+                                hide_index=True,
+                                height=dataframe_display_height(len(module_funnel_table)),
+                            )
+                            table_export_row(module_funnel_table, "branded_flow_ecp_module_funnel.csv")
                     else:
                         st.info("No control/test branded-flow calls match the selected tab date range.")
 
@@ -1511,11 +1692,12 @@ with tab_brand:
 # TAB — FIND MY PLAN
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_fmp:
-    st.subheader("Find My Plan")
-    st.caption(
+    fmp_help_base = (
         "Uses the site experience hint launched May 20, 2026 around 11:00 AM EST. "
         "The sidebar Date Range is ignored; other sidebar filters still apply."
     )
+    fmp_header = st.empty()
+    fmp_header.subheader("Find My Plan", help=fmp_help_base)
 
     fmp_hint_col = site_experience_hint_column(df_raw)
 
@@ -1547,9 +1729,12 @@ with tab_fmp:
                     fmp_df = add_fmp_recommendation_columns(fmp_df, fmp_hint_col)
 
                 latest_fmp_base_dt = fmp_base[FMP_DT_COL].max()
-                st.caption(
-                    f"Launch window: {FMP_LAUNCH_AT:%b %d, %Y %I:%M %p} "
-                    f"through latest loaded row ({latest_fmp_base_dt:%b %d, %Y %I:%M %p})."
+                fmp_header.subheader(
+                    "Find My Plan",
+                    help=(
+                        f"{fmp_help_base} Launch window: {FMP_LAUNCH_AT:%b %d, %Y %I:%M %p} "
+                        f"through latest loaded row ({latest_fmp_base_dt:%b %d, %Y %I:%M %p})."
+                    ),
                 )
 
                 fmp_orders_rows = fmp_df[order_revenue_mask(fmp_df)] if not fmp_df.empty else fmp_df
@@ -1638,7 +1823,7 @@ with tab_fmp:
                     fmp_funnel_table = pd.DataFrame(fmp_funnel_rows)
                     st.dataframe(
                         fmp_funnel_table,
-                        use_container_width=True,
+                        **stretch_width_kwargs(),
                         hide_index=True,
                         height=dataframe_display_height(len(fmp_funnel_table)),
                     )
@@ -1716,7 +1901,7 @@ with tab_fmp:
                             margin=dict(l=52, r=110, t=52, b=52),
                             showlegend=False,
                         )
-                        st.plotly_chart(fig_fmp_mix, use_container_width=True)
+                        st.plotly_chart(fig_fmp_mix, **stretch_width_kwargs())
 
                     st.divider()
                     st.subheader("FMP Calls")
@@ -1803,7 +1988,7 @@ with tab_fmp:
 
                     st.dataframe(
                         fmp_call_table,
-                        use_container_width=True,
+                        **stretch_width_kwargs(),
                         hide_index=True,
                         height=dataframe_display_height(len(fmp_call_table), cap=2400),
                     )
@@ -1813,12 +1998,14 @@ with tab_fmp:
 # TAB — VOLUME SHIFTS (SECOND TAB): INBOUND MIX + CUSTOM-PERIOD MIX / METRIC BY BUCKET
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_volume:
-    st.subheader("Mix Shifts")
-    st.caption(
-        "**Trend line chart** uses the sidebar **Date Range** plus Center, Marketing, Mover/Switcher, Tenure, and Site/SERP. "
-        "Choose a **funnel step** to plot that step’s **mix** across the selected dimension (shares sum to 100% within each period). "
-        "**Custom period mix** below ignores the sidebar date range "
-        "(same rule as Overview → Custom Period Comparison) and compares **mix %** for Period 1 vs Period 2."
+    st.subheader(
+        "Mix Shifts",
+        help=(
+            "**Trend line chart** uses the sidebar **Date Range** plus Center, Marketing, Mover/Switcher, Tenure, and Site/SERP. "
+            "Choose a **funnel step** to plot that step’s **mix** across the selected dimension (shares sum to 100% within each period). "
+            "**Custom period mix** below ignores the sidebar date range "
+            "(same rule as Overview → Custom Period Comparison) and compares **mix %** for Period 1 vs Period 2."
+        ),
     )
 
     VOL_DIM_CHOICES = {
@@ -1833,8 +2020,8 @@ with tab_volume:
     # Funnel-step mix for the trend line chart (denominator = period total of that step).
     VOL_MIX_STEP_CHOICES = {
         "Net Calls": "calls",
-        "CiContact": "ci_contact",
-        "CiCredit": "ci_credit",
+        "Contact Calls": "ci_contact",
+        "Credit Calls": "ci_credit",
         "Sales": "sales",
     }
     VOL_MIX_STEP_YAXIS = {
@@ -1938,23 +2125,16 @@ with tab_volume:
     if v_ts.empty and v_cmp_in.empty and v_sold_partner_ts.empty and v_sold_partner_cmp.empty:
         st.info("No inbound or sold partner calls match the current filters.")
     else:
-        vc1, vc2, vc3, vc4 = st.columns([1, 1, 1, 1])
+        vol_gran = time_granularity
+        vc1, vc2, vc3 = st.columns([1, 1, 1])
         with vc1:
-            vol_gran = st.radio(
-                "Granularity",
-                PERIOD_OPTIONS,
-                index=1,
-                horizontal=True,
-                key="vol_granularity",
-            )
-        with vc2:
             vol_dim_label = st.selectbox(
                 "Mix dimension 1",
                 list(VOL_DIM_CHOICES.keys()),
                 index=0,
                 key="vol_mix_dim",
             )
-        with vc3:
+        with vc2:
             _dim2_options = ["All"] + list(VOL_DIM_CHOICES.keys())
             vol_dim2_label = st.selectbox(
                 "Mix dimension 2",
@@ -1962,7 +2142,7 @@ with tab_volume:
                 index=0,
                 key="vol_mix_dim2",
             )
-        with vc4:
+        with vc3:
             vol_top_n = st.slider("Top categories (rest → Other)", 4, 14, 8, key="vol_top_n")
 
         vol_mix_step_label = st.selectbox(
@@ -1970,7 +2150,7 @@ with tab_volume:
             list(VOL_MIX_STEP_CHOICES.keys()),
             index=0,
             key="vol_funnel_mix_step",
-            help="Net Calls = inbound call counts. CiContact / CiCredit = inbound flag sums by bucket. Sales = inbound + manual outbound order counts by bucket. If Sold Partner is selected as a mix dimension, all steps are limited to sold calls only.",
+            help="Net Calls = inbound call counts. Contact Calls / Credit Calls = inbound flag sums by bucket. Sales = inbound + manual outbound order counts by bucket. If Sold Partner is selected as a mix dimension, all steps are limited to sold calls only.",
         )
         vol_mix_step = VOL_MIX_STEP_CHOICES[vol_mix_step_label]
 
@@ -2009,7 +2189,7 @@ with tab_volume:
                 margin=dict(l=52, r=20, t=52, b=100),
                 legend=dict(orientation="h", yanchor="bottom", y=-0.38, x=0),
             )
-            st.plotly_chart(fig_lines, use_container_width=True)
+            st.plotly_chart(fig_lines, **stretch_width_kwargs())
         elif not v_ts.empty:
             st.info(
                 "Not enough data to chart this funnel step for the selected dimension and granularity "
@@ -2018,13 +2198,15 @@ with tab_volume:
 
         # — Custom period mix comparison (same date rules as Overview custom period)
         st.divider()
-        st.subheader("Custom Period Mix Comparison")
-        st.caption(
-            "Ignores the sidebar **Date Range**; uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
-            "Table: inbound **call mix** by category (top-N + Other) vs **Performance metric** per bucket. "
-            "When **Sold Partner** is a mix dimension, the mix and bucket metrics are limited to sold calls only. "
-            "**Mix / rate / interaction / total impact** columns decompose **P2 − P1** in the selected metric using "
-            "call-mix weights × bucket rates (percentage metrics in **ppt**). The four impacts **sum** to total change per row and overall."
+        st.subheader(
+            "Custom Period Mix Comparison",
+            help=(
+                "Ignores the sidebar **Date Range**; uses Center, Marketing, Mover/Switcher, Tenure, and Call Type filters. "
+                "Table: inbound **call mix** by category (top-N + Other) vs **Performance metric** per bucket. "
+                "When **Sold Partner** is a mix dimension, the mix and bucket metrics are limited to sold calls only. "
+                "**Mix / rate / interaction / total impact** columns decompose **P2 − P1** in the selected metric using "
+                "call-mix weights × bucket rates (percentage metrics in **ppt**). The four impacts **sum** to total change per row and overall."
+            ),
         )
 
         if "call_date_est" not in vol_cmp_base.columns or len(vol_cmp_base) == 0:
@@ -2034,7 +2216,7 @@ with tab_volume:
         else:
             _cmp_min = vol_cmp_base["call_date_est"].min().date()
             _cmp_max = vol_cmp_base["call_date_est"].max().date()
-            _cmp_cap = min(_cmp_max, report_through_date())
+            _cmp_cap = _cmp_max
             if _cmp_cap < _cmp_min:
                 _cmp_cap = _cmp_min
             _w = timedelta(days=6)
@@ -2291,7 +2473,7 @@ with tab_volume:
 
                 st.dataframe(
                     _sty_cmp,
-                    use_container_width=True,
+                    **stretch_width_kwargs(),
                     hide_index=True,
                     height=dataframe_display_height(len(cmp_df)),
                 )
@@ -2332,7 +2514,7 @@ with tab_volume:
                     yaxis=plotly_axis_extra("Share (%)", tickformat=".1f"),
                     **_vol_cmp_layout,
                 )
-                st.plotly_chart(fig_cmp, use_container_width=True)
+                st.plotly_chart(fig_cmp, **stretch_width_kwargs())
 
                 _y1 = [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else float("nan") for x in _raw_m1]
                 _y2 = [float(x) if x is not None and not (isinstance(x, float) and pd.isna(x)) else float("nan") for x in _raw_m2]
@@ -2372,7 +2554,7 @@ with tab_volume:
                     yaxis_title=vol_cmp_metric,
                     **_vol_cmp_layout,
                 )
-                st.plotly_chart(fig_m_cmp, use_container_width=True)
+                st.plotly_chart(fig_m_cmp, **stretch_width_kwargs())
 
                 _eff_unit = "ppt" if _m_fmt == "pct" else str(_m_fmt)
                 _y_title = f"Effect ({_eff_unit})"
@@ -2442,7 +2624,7 @@ with tab_volume:
                     line_color=chart_hline_reference(),
                     layer="below",
                 )
-                st.plotly_chart(fig_dec, use_container_width=True)
+                st.plotly_chart(fig_dec, **stretch_width_kwargs())
             else:
                 st.info("Select a full start and end date for each period.")
 
@@ -2451,10 +2633,12 @@ with tab_volume:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_agent:
 
-    st.subheader("Agent Level Performance")
-    st.caption(
-        "One row per agent. All sidebar filters apply. "
-        "GCV metrics are per-call averages. Rates are computed from calls in the filtered date range."
+    st.subheader(
+        "Agent Level Performance",
+        help=(
+            "One row per agent. All sidebar filters apply. "
+            "GCV metrics are per-call averages. Rates are computed from calls in the filtered date range."
+        ),
     )
 
     agent_needed = {"agent_name", "orders", "total_revenue", "talk_time_minutes"}
@@ -2470,7 +2654,7 @@ with tab_agent:
             sort_col = st.selectbox(
                 "Sort By",
                 ["Calls", "Net Conv.", "Rev / Call", "Rev / Order", "Top Product Mix",
-                 "Total Revenue", "Talk Time", "Sold Talk Time"],
+                "Total Revenue", "Talk Time", "Sold Talk Time"],
                 key="agent_sort",
             )
         with al_c3:
@@ -2544,7 +2728,7 @@ with tab_agent:
                 height=260,
                 margin=dict(l=44, r=20, t=40, b=44),
             )
-            st.plotly_chart(fig_nc, use_container_width=True)
+            st.plotly_chart(fig_nc, **stretch_width_kwargs())
 
         with dc2:
             st.markdown("**Revenue Per Call × Agents (Distribution)**")
@@ -2563,7 +2747,7 @@ with tab_agent:
                 height=260,
                 margin=dict(l=44, r=20, t=40, b=44),
             )
-            st.plotly_chart(fig_rc, use_container_width=True)
+            st.plotly_chart(fig_rc, **stretch_width_kwargs())
 
         # Format for display
         fmt_df = agent_df.copy()
@@ -2577,7 +2761,7 @@ with tab_agent:
 
         st.dataframe(
             fmt_df,
-            use_container_width=True,
+            **stretch_width_kwargs(),
             hide_index=True,
             height=dataframe_display_height(len(fmt_df)),
         )
@@ -2692,7 +2876,7 @@ with tab_lift:
     )
     min_post_date = post_dates.min().date()
     max_post_date = post_dates.max().date()
-    max_post_selectable = min(max_post_date, report_through_date())
+    max_post_selectable = max_post_date
     if max_post_selectable < min_post_date:
         max_post_selectable = min_post_date
 
@@ -2913,9 +3097,6 @@ with tab_lift:
     n_weeks      = len(weekly_df)
     total_weight = int(weekly_df["weight"].sum()) if not weekly_df.empty else 0
 
-    # ── Section 1: KPI cards ───────────────────────────────────────────────────
-    st.subheader(f"{lift_center} — Test Period Lift Summary")
-
     # Show a notice when filters are active so users understand the
     # pre baseline is also scoped to the filtered call population
     active_filters = []
@@ -2935,7 +3116,8 @@ with tab_lift:
         caption_base += f"  ·  Filters active: {' | '.join(active_filters)}"
         caption_base += "  ·  Pre baseline scoped to same filtered call types"
 
-    st.caption(caption_base)
+    # ── Section 1: KPI cards ───────────────────────────────────────────────────
+    st.subheader(f"{lift_center} — Test Period Lift Summary", help=caption_base)
 
     def fmt_swing_metric(k):
         s      = weighted_avg(f"swing_{k}")
@@ -2969,11 +3151,13 @@ with tab_lift:
     st.divider()
 
     # ── Section 2: Summary table ───────────────────────────────────────────────
-    st.subheader("Pre vs Post Summary Table")
-    st.caption(
-        "All values are weighted averages across post weeks, "
-        "weighted by total post IB calls per week. "
-        "Pre baseline uses the same filters as the post period."
+    st.subheader(
+        "Pre vs Post Summary Table",
+        help=(
+            "All values are weighted averages across post weeks, "
+            "weighted by total post IB calls per week. "
+            "Pre baseline uses the same filters as the post period."
+        ),
     )
 
     def fmt_kpi_val(k, v):
@@ -3023,7 +3207,7 @@ with tab_lift:
     styler = summary_tbl.style.apply(_style_lift_summary_row, axis=1)
     st.dataframe(
         styler,
-        use_container_width=True,
+        **stretch_width_kwargs(),
         hide_index=True,
         height=dataframe_display_height(len(summary_tbl)),
     )
@@ -3032,11 +3216,13 @@ with tab_lift:
     st.divider()
 
     # ── Section 3: Trend chart ─────────────────────────────────────────────────
-    st.subheader("Trend Over Time")
-    st.caption(
-        "Solid lines = Arcadia, dashed = Atom. "
-        "Use 'View' to plot raw KPI values, Post Δ, or Swing. "
-        "Sidebar filters apply to both pre and post."
+    st.subheader(
+        "Trend Over Time",
+        help=(
+            "Solid lines = Arcadia, dashed = Atom. "
+            "Use 'View' to plot raw KPI values, Post Δ, or Swing. "
+            "Sidebar filters apply to both pre and post."
+        ),
     )
 
     lt_c1, lt_c2, lt_c3 = st.columns(3)
@@ -3248,6 +3434,6 @@ with tab_lift:
                 annotation_font_color=_hcol,
             )
 
-        st.plotly_chart(fig_lift, use_container_width=True)
+        st.plotly_chart(fig_lift, **stretch_width_kwargs())
     else:
         st.info("No data available for the selected combination.")

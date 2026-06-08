@@ -24,6 +24,26 @@ _CMP_DATES_SIG_KEY = "_arcadia_cmp_dates_url_sig"
 _CMP_LS_PAYLOAD_SIG_KEY = "_cmp_ls_payload_sig"
 
 
+def _streamlit_version_at_least(major: int, minor: int) -> bool:
+    parts = []
+    for part in str(getattr(st, "__version__", "0.0")).split(".")[:2]:
+        try:
+            parts.append(int("".join(ch for ch in part if ch.isdigit()) or "0"))
+        except ValueError:
+            parts.append(0)
+    while len(parts) < 2:
+        parts.append(0)
+    return tuple(parts) >= (major, minor)
+
+
+def _run_hidden_js(script_html: str) -> None:
+    if _streamlit_version_at_least(1, 57) and hasattr(st, "html"):
+        st.html(script_html, unsafe_allow_javascript=True)
+    else:
+        import streamlit.components.v1 as components
+        components.html(script_html, height=0, width=0)
+
+
 def restore_cmp_dates_from_query_params() -> None:
     """Restore Overview custom period ``date_input`` widgets after a theme sync navigation."""
     from datetime import date as date_cls
@@ -58,8 +78,6 @@ def restore_cmp_dates_from_query_params() -> None:
 
 def persist_ov_cmp_dates_browser() -> None:
     """Mirror custom period dates to ``localStorage`` so :func:`_sync_streamlit_browser_theme` can pass them through the URL on theme change."""
-    import streamlit.components.v1 as components
-
     p1 = st.session_state.get("ov_cmp_period1")
     p2 = st.session_state.get("ov_cmp_period2")
     if not p1 or len(p1) != 2 or not p2 or len(p2) != 2:
@@ -70,7 +88,7 @@ def persist_ov_cmp_dates_browser() -> None:
     st.session_state[_CMP_LS_PAYLOAD_SIG_KEY] = ls_sig
     payload1 = json.dumps([str(p1[0]), str(p1[1])])
     payload2 = json.dumps([str(p2[0]), str(p2[1])])
-    components.html(
+    _run_hidden_js(
         f"""<script>
 (function () {{
   try {{
@@ -85,9 +103,7 @@ def persist_ov_cmp_dates_browser() -> None:
     ls.setItem({json.dumps(CMP_LS_KEY_P2)}, {json.dumps(payload2)});
   }} catch (e) {{}}
 }})();
-</script>""",
-        height=0,
-        width=0,
+</script>"""
     )
 
 
@@ -333,7 +349,7 @@ html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label {{
 }}
 
 .main .block-container {{
-    padding: 2.75rem 2.5rem 4rem !important;
+    padding: 1.25rem 2.5rem 4rem !important;
     max-width: 1600px !important;
 }}
 
@@ -787,10 +803,8 @@ def _sync_streamlit_browser_theme(light: bool) -> None:
     (see Streamlit ``storageUtils.ts``). If it differs from the sidebar choice, set it and reload
     once so ``st.dataframe`` uses the correct palette from ``[theme.light]`` / ``[theme.dark]``.
     """
-    import streamlit.components.v1 as components
-
     desired = "Light" if light else "Dark"
-    components.html(
+    _run_hidden_js(
         f"""<script>
 (function () {{
   var desired = {json.dumps(desired)};
@@ -848,9 +862,7 @@ def _sync_streamlit_browser_theme(light: bool) -> None:
     catch (e) {{ window.top.location.href = u.toString(); }}
   }} catch (e) {{}}
 }})();
-</script>""",
-        height=0,
-        width=0,
+</script>"""
     )
 
 
