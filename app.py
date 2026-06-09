@@ -333,11 +333,14 @@ ECP_MODULE_SELECTION_DISPLAY = {
 
 FMP_LAUNCH_AT = pd.Timestamp("2026-05-20 11:00:00")
 FMP_HINT_COL_CANDIDATES = ("site_experience_hint", "siteExperienceHint")
+FMP_HINT_ELIGIBLE_COL_CANDIDATES = ("fmp_hint_eligible", "fmpHintEligible")
 FMP_HINT_PREFIX = "Find My Plan"
 FMP_DT_COL = "_fmp_dt"
 FMP_REC_TEXT_COL = "_fmp_recommended_text"
 FMP_REC_PROVIDER_COL = "_fmp_recommended_provider"
 FMP_REC_PLAN_COL = "_fmp_recommended_plan"
+FMP_PRE_ELIGIBLE_LABEL = "Pre-Launch Eligible"
+FMP_POST_HINT_LABEL = "Post-Launch Hinted"
 FMP_RECOMMENDED_PROVIDER_PREFIXES = (
     "Frontier Utilities",
     "Discount Power",
@@ -350,6 +353,9 @@ FMP_RECOMMENDED_PROVIDER_PREFIXES = (
     "Reliant",
     "APG&E",
 )
+PITCH_FAIL_PAGEVIEW_COL_CANDIDATES = ("pitch_fail_pageview", "pitchFailPageview")
+PITCH_FAIL_RESOLVED_COL_CANDIDATES = ("pitch_fail_resolved", "pitchFailResolved")
+PITCH_PAGEVIEW_COL_CANDIDATES = ("pitch_pageview", "pitchPageview", "any_pitch_pageview", "anyPitchPageview")
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 def apply_filters(base, use_date_range=True):
@@ -436,8 +442,34 @@ def display_ecp_module_selection(value) -> str:
     )
 
 
+def first_existing_column(d: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    return next((c for c in candidates if c in d.columns), None)
+
+
 def site_experience_hint_column(d: pd.DataFrame) -> str | None:
-    return next((c for c in FMP_HINT_COL_CANDIDATES if c in d.columns), None)
+    return first_existing_column(d, FMP_HINT_COL_CANDIDATES)
+
+
+def fmp_hint_eligible_column(d: pd.DataFrame) -> str | None:
+    return first_existing_column(d, FMP_HINT_ELIGIBLE_COL_CANDIDATES)
+
+
+def pitch_fail_pageview_column(d: pd.DataFrame) -> str | None:
+    return first_existing_column(d, PITCH_FAIL_PAGEVIEW_COL_CANDIDATES)
+
+
+def pitch_fail_resolved_column(d: pd.DataFrame) -> str | None:
+    return first_existing_column(d, PITCH_FAIL_RESOLVED_COL_CANDIDATES)
+
+
+def pitch_pageview_column(d: pd.DataFrame) -> str | None:
+    return first_existing_column(d, PITCH_PAGEVIEW_COL_CANDIDATES)
+
+
+def bool_like_true_mask(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    normalized = values.astype("string").str.strip().str.lower()
+    return (numeric.fillna(0).ne(0) | normalized.isin({"1", "true", "t", "yes", "y"})).fillna(False)
 
 
 def fmp_datetime_series(d: pd.DataFrame) -> tuple[pd.Series, bool]:
@@ -769,11 +801,12 @@ st.title("⚡ Arcadia Performance Dash", help=title_help)
 st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_overview, tab_volume, tab_agent, tab_current_tests, tab_lift = st.tabs([
+tab_overview, tab_volume, tab_agent, tab_current_tests, tab_fail_monitoring, tab_lift = st.tabs([
     "Overview",
     "Volume Shifts",
     "Agent Level",
     "Current Tests",
+    "Fail Monitoring",
     "Arcadia vs Atom",
 ])
 
@@ -1206,6 +1239,278 @@ with tab_overview:
         overview_visuals_container.info("No data available for trend chart.")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB — FAIL MONITORING
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_fail_monitoring:
+    st.subheader(
+        "Pitch Fail Monitoring",
+        help=(
+            "Shows pitch fail page views and resolved fail calls for the current sidebar filters. "
+            "Fail rate is calculated out of filtered calls with any pitch page view."
+        ),
+    )
+
+    pitch_col = pitch_pageview_column(df)
+    fail_col = pitch_fail_pageview_column(df)
+    resolved_col = pitch_fail_resolved_column(df)
+
+    if pitch_col is None:
+        st.info("The loaded call data does not include a pitch_pageview field.")
+    elif fail_col is None:
+        st.info("The loaded call data does not include a pitch_fail_pageview field.")
+    elif "call_date_est" not in df.columns:
+        st.info("The loaded call data does not include a call_date_est field.")
+    else:
+        fail_base = df.dropna(subset=["call_date_est"]).copy()
+
+        if fail_base.empty:
+            st.info("No calls match the current sidebar filters.")
+        else:
+            fail_base["_pitch_pageview"] = bool_like_true_mask(fail_base[pitch_col])
+            fail_base["_pitch_fail"] = bool_like_true_mask(fail_base[fail_col])
+            if resolved_col is not None:
+                fail_base["_pitch_fail_resolved"] = (
+                    bool_like_true_mask(fail_base[resolved_col]) & fail_base["_pitch_fail"]
+                )
+            else:
+                fail_base["_pitch_fail_resolved"] = False
+
+            total_calls = int(len(fail_base))
+            pitch_pageview_calls = int(fail_base["_pitch_pageview"].sum())
+            fail_calls = int(fail_base["_pitch_fail"].sum())
+            resolved_fail_calls = int(fail_base["_pitch_fail_resolved"].sum())
+
+            fm1, fm2, fm3, fm4, fm5, fm6 = st.columns(6)
+            fm1.metric(
+                "Total Calls",
+                f"{total_calls:,}",
+                help="Includes inbound and outbound calls after the sidebar filters are applied.",
+            )
+            fm2.metric(
+                "Pitch Pageview Calls",
+                f"{pitch_pageview_calls:,}",
+                help="Includes inbound and outbound calls with any pitch page view after the sidebar filters are applied.",
+            )
+            fm3.metric("Fail Calls", f"{fail_calls:,}")
+            fm4.metric(
+                "Fail Rate",
+                f"{safe_rate(fail_calls, pitch_pageview_calls):.1%}" if pitch_pageview_calls else "-",
+            )
+            fm5.metric(
+                "Resolved Fails",
+                f"{resolved_fail_calls:,}" if resolved_col is not None else "-",
+            )
+            fm6.metric(
+                "Resolution Rate",
+                (
+                    f"{safe_rate(resolved_fail_calls, fail_calls):.1%}"
+                    if fail_calls and resolved_col is not None
+                    else "-"
+                ),
+            )
+
+            st.divider()
+            st.subheader("Fails Over Time")
+
+            if st.session_state.get("pitch_fail_monitor_view") == "% of Total Calls":
+                st.session_state["pitch_fail_monitor_view"] = "% of Pitch Pageview Calls"
+            fail_view = st.radio(
+                "View",
+                ["Fail Calls", "% of Pitch Pageview Calls"],
+                horizontal=True,
+                key="pitch_fail_monitor_view",
+            )
+
+            fail_base["period"] = period_labels(fail_base["call_date_est"], time_granularity)
+            fail_ts = (
+                fail_base
+                .groupby("period")
+                .agg(
+                    total_calls=("_pitch_fail", "size"),
+                    pitch_pageview_calls=("_pitch_pageview", "sum"),
+                    fail_calls=("_pitch_fail", "sum"),
+                    resolved_fail_calls=("_pitch_fail_resolved", "sum"),
+                )
+                .reset_index()
+            )
+            fail_ts["period"] = pd.to_datetime(fail_ts["period"])
+            fail_ts = fail_ts.sort_values("period")
+            for col in ["total_calls", "pitch_pageview_calls", "fail_calls", "resolved_fail_calls"]:
+                fail_ts[col] = pd.to_numeric(fail_ts[col], errors="coerce").fillna(0).astype(int)
+            fail_ts["fail_rate"] = (
+                fail_ts["fail_calls"] / fail_ts["pitch_pageview_calls"].replace(0, np.nan)
+            )
+            fail_ts["resolved_fail_rate_pitch"] = (
+                fail_ts["resolved_fail_calls"] / fail_ts["pitch_pageview_calls"].replace(0, np.nan)
+            )
+
+            if fail_ts.empty:
+                st.info("No dated calls are available for the selected filters.")
+            else:
+                is_rate_view = fail_view == "% of Pitch Pageview Calls"
+                fig_fail = go.Figure()
+                trace_specs = [
+                    ("Pitch Fail", "fail_calls", "fail_rate", PLOT_COLORWAY[3], "solid"),
+                ]
+                if resolved_col is not None:
+                    trace_specs.append(
+                        (
+                            "Resolved Fail",
+                            "resolved_fail_calls",
+                            "resolved_fail_rate_pitch",
+                            PLOT_COLORWAY[5],
+                            "dot",
+                        )
+                    )
+
+                for label, count_col, rate_col, color, dash in trace_specs:
+                    if is_rate_view:
+                        customdata = fail_ts[[count_col, "pitch_pageview_calls", "total_calls"]]
+                        hovertemplate = (
+                            "%{x|%b %d, %Y}<br>"
+                            "%{y:.2%}<br>"
+                            "Calls: %{customdata[0]:,}<br>"
+                            "Pitch pageview calls: %{customdata[1]:,}<br>"
+                            "Total calls: %{customdata[2]:,}"
+                            f"<extra>{label}</extra>"
+                        )
+                        y_values = fail_ts[rate_col]
+                    else:
+                        customdata = fail_ts[[rate_col, "pitch_pageview_calls", "total_calls"]]
+                        hovertemplate = (
+                            "%{x|%b %d, %Y}<br>"
+                            "Calls: %{y:,}<br>"
+                            "% of pitch pageview calls: %{customdata[0]:.2%}<br>"
+                            "Pitch pageview calls: %{customdata[1]:,}<br>"
+                            "Total calls: %{customdata[2]:,}"
+                            f"<extra>{label}</extra>"
+                        )
+                        y_values = fail_ts[count_col]
+
+                    fig_fail.add_trace(
+                        go.Scatter(
+                            x=fail_ts["period"],
+                            y=y_values,
+                            name=label,
+                            mode="lines+markers",
+                            line=dict(width=2, color=color, dash=dash),
+                            marker=dict(size=6, color=color),
+                            customdata=customdata,
+                            hovertemplate=hovertemplate,
+                        )
+                    )
+
+                tick_vals = fail_ts["period"].tolist()
+                tick_text = fail_ts["period"].dt.strftime(PERIOD_FMT[time_granularity]).tolist()
+                y_axis_title = "% of Pitch Pageview Calls" if is_rate_view else "Calls"
+                y_axis_fmt = ".2%" if is_rate_view else ",.0f"
+                apply_chart_theme(
+                    fig_fail,
+                    title=layout_chart_title(
+                        "Pitch fails over time"
+                        if not is_rate_view
+                        else "Pitch fail rate over time"
+                    ),
+                    xaxis=dict(tickvals=tick_vals, ticktext=tick_text, **plotly_axis_lines()),
+                    yaxis=plotly_axis_extra(y_axis_title, tickformat=y_axis_fmt, rangemode="tozero"),
+                    height=420,
+                    margin=dict(l=52, r=24, t=56, b=72),
+                    legend=dict(orientation="h", y=-0.22),
+                )
+                st.plotly_chart(fig_fail, **stretch_width_kwargs())
+
+            with st.expander(f"Failed Calls ({fail_calls:,})", expanded=False):
+                if fail_calls == 0:
+                    st.info("No failed calls match the current sidebar filters.")
+                else:
+                    fail_detail = fail_base.loc[fail_base["_pitch_fail"]].copy()
+                    if "call_time_est" in fail_detail.columns:
+                        call_time = pd.to_datetime(fail_detail["call_time_est"], errors="coerce")
+                    else:
+                        call_time = pd.Series(pd.NaT, index=fail_detail.index)
+                    fail_detail["_fail_sort_dt"] = call_time.fillna(
+                        pd.to_datetime(fail_detail["call_date_est"], errors="coerce")
+                    )
+                    fail_has_time = call_time.notna().any()
+                    fail_detail = fail_detail.sort_values("_fail_sort_dt", ascending=False)
+                    fail_detail["_display_call_time"] = fail_detail["_fail_sort_dt"].dt.strftime(
+                        "%b %d, %Y %I:%M %p" if fail_has_time else "%b %d, %Y"
+                    )
+                    fail_detail["_resolved_display"] = (
+                        np.where(fail_detail["_pitch_fail_resolved"], "Yes", "No")
+                        if resolved_col is not None
+                        else "-"
+                    )
+
+                    fail_table_cols = [
+                        ("_display_call_time", "Call Time"),
+                        ("call_id", "Call ID"),
+                        ("_resolved_display", "Resolved"),
+                        ("agent_name", "Agent"),
+                        ("center_location", "Center"),
+                        ("marketing_bucket", "Marketing Bucket"),
+                        ("moverSwitcher", "Mover / Switcher"),
+                        ("tenure_bucket", "Tenure"),
+                        ("call_type", "Site/SERP"),
+                        ("call_direction", "Call Direction"),
+                        (SOLD_PROVIDER_COLUMN, "Sold Provider"),
+                        ("product_name", "Product"),
+                        ("orders", "Orders"),
+                        ("total_revenue", "Revenue"),
+                    ]
+                    display_cols = [
+                        (src, label)
+                        for src, label in fail_table_cols
+                        if src in fail_detail.columns
+                    ]
+                    fail_call_table = fail_detail[[src for src, _ in display_cols]].copy()
+                    fail_call_table.columns = [label for _, label in display_cols]
+
+                    text_cols = [
+                        "Call Time",
+                        "Call ID",
+                        "Resolved",
+                        "Agent",
+                        "Center",
+                        "Marketing Bucket",
+                        "Mover / Switcher",
+                        "Tenure",
+                        "Site/SERP",
+                        "Call Direction",
+                        "Sold Provider",
+                        "Product",
+                    ]
+                    for col in text_cols:
+                        if col in fail_call_table.columns:
+                            fail_call_table[col] = (
+                                fail_call_table[col]
+                                .astype("string")
+                                .str.strip()
+                                .replace({"": pd.NA, "<NA>": pd.NA})
+                                .fillna("-")
+                            )
+                    if "Orders" in fail_call_table.columns:
+                        fail_call_table["Orders"] = (
+                            pd.to_numeric(fail_call_table["Orders"], errors="coerce")
+                            .fillna(0)
+                            .astype(int)
+                            .map(lambda x: f"{x:,}")
+                        )
+                    if "Revenue" in fail_call_table.columns:
+                        fail_call_table["Revenue"] = (
+                            pd.to_numeric(fail_call_table["Revenue"], errors="coerce")
+                            .map(lambda x: f"${x:,.2f}" if pd.notna(x) else "-")
+                        )
+
+                    st.dataframe(
+                        fail_call_table,
+                        **stretch_width_kwargs(),
+                        hide_index=True,
+                        height=dataframe_display_height(len(fail_call_table), cap=2400),
+                    )
+                    table_export_row(fail_call_table, "pitch_fail_calls.csv")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TAB — BRANDED FLOW TEST
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_brand:
@@ -1382,10 +1687,16 @@ with tab_brand:
                                 "Sold Partner":     SOLD_PROVIDER_COLUMN,
                                 "None (Overall)":   None,
                             }
+                            if (
+                                "_brand_flow_group_overall_default_applied" not in st.session_state
+                                and st.session_state.get("brand_flow_group") == "Center"
+                            ):
+                                st.session_state["brand_flow_group"] = "None (Overall)"
+                                st.session_state["_brand_flow_group_overall_default_applied"] = True
                             brand_group_choice = st.selectbox(
                                 "Group By",
                                 options=list(BRAND_GROUP_COL_MAP.keys()),
-                                index=0,
+                                index=list(BRAND_GROUP_COL_MAP.keys()).index("None (Overall)"),
                                 key="brand_flow_group",
                             )
                             brand_group_col = BRAND_GROUP_COL_MAP[brand_group_choice]
@@ -1582,100 +1893,83 @@ with tab_brand:
 
                             side_totals = {}
                             side_interacted = {}
+                            side_ecp = {}
+                            side_ms = {}
                             for brand_value in BRAND_TEST_VALUES:
                                 side_df = module_df[module_df[BRAND_TEST_COL] == brand_value]
                                 side_totals[brand_value] = len(side_df)
                                 side_interacted[brand_value] = int(side_df["_ecp_interacted"].sum())
+                                side_ecp[brand_value] = int(
+                                    side_df[ECP_MODULE_SELECTION_CLEAN_COL].eq("clicked_ecp").sum()
+                                )
+                                side_ms[brand_value] = int(
+                                    side_df[ECP_MODULE_SELECTION_CLEAN_COL].eq("clicked_mover_or_switcher").sum()
+                                )
 
-                            def _fmt_module_cell(count, rate=None):
-                                if rate is None:
-                                    return f"{count:,}"
-                                return f"{count:,} ({rate:.1%})" if pd.notna(rate) else f"{count:,} (—)"
+                            def _fmt_module_count(count):
+                                return f"{count:,}"
+
+                            def _fmt_module_rate(rate):
+                                return f"{rate:.1%}" if pd.notna(rate) else "-"
 
                             def _fmt_module_pct_change(control_value, test_value):
                                 return fmt_pct_change_str(pct_change_vs_prior(control_value, test_value))
 
-                            control_clicked_rate = safe_rate(
-                                side_interacted["control"],
-                                side_totals["control"],
-                            )
-                            test_clicked_rate = safe_rate(
-                                side_interacted["test"],
-                                side_totals["test"],
-                            )
-                            module_funnel_rows = [
-                                {
-                                    "Step": "All People",
-                                    "Control": _fmt_module_cell(side_totals["control"]),
-                                    "Test": _fmt_module_cell(side_totals["test"]),
-                                    "% Change": _fmt_module_pct_change(
+                            module_metrics = {
+                                "control": {
+                                    "calls": side_totals["control"],
+                                    "clicked_module_rate": safe_rate(
+                                        side_interacted["control"],
                                         side_totals["control"],
+                                    ),
+                                    "clicked_module_calls": side_interacted["control"],
+                                    "clicked_ecp_rate": safe_rate(
+                                        side_ecp["control"],
+                                        side_interacted["control"],
+                                    ),
+                                    "clicked_ms_rate": safe_rate(
+                                        side_ms["control"],
+                                        side_interacted["control"],
+                                    ),
+                                },
+                                "test": {
+                                    "calls": side_totals["test"],
+                                    "clicked_module_rate": safe_rate(
+                                        side_interacted["test"],
                                         side_totals["test"],
                                     ),
-                                },
-                                {
-                                    "Step": "Clicked Anything",
-                                    "Control": _fmt_module_cell(
-                                        side_interacted["control"],
-                                        control_clicked_rate,
-                                    ),
-                                    "Test": _fmt_module_cell(
+                                    "clicked_module_calls": side_interacted["test"],
+                                    "clicked_ecp_rate": safe_rate(
+                                        side_ecp["test"],
                                         side_interacted["test"],
-                                        test_clicked_rate,
                                     ),
-                                    "% Change": _fmt_module_pct_change(
-                                        control_clicked_rate,
-                                        test_clicked_rate,
+                                    "clicked_ms_rate": safe_rate(
+                                        side_ms["test"],
+                                        side_interacted["test"],
                                     ),
                                 },
+                            }
+
+                            module_row_specs = [
+                                ("Calls", "calls", "count"),
+                                ("Clicked Module %", "clicked_module_rate", "pct"),
+                                ("Clicked Module Calls", "clicked_module_calls", "count"),
+                                ("Clicked ECP %", "clicked_ecp_rate", "pct"),
+                                ("Clicked M/S %", "clicked_ms_rate", "pct"),
                             ]
-
-                            interacted_module_df = module_df[module_df["_ecp_interacted"]].copy()
-                            if not interacted_module_df.empty:
-                                response_order = (
-                                    interacted_module_df[ECP_MODULE_SELECTION_CLEAN_COL]
-                                    .map(display_ecp_module_selection)
-                                    .value_counts()
-                                    .index
-                                    .tolist()
+                            module_funnel_rows = []
+                            for label, key, fmt in module_row_specs:
+                                control_value = module_metrics["control"][key]
+                                test_value = module_metrics["test"][key]
+                                formatter = _fmt_module_count if fmt == "count" else _fmt_module_rate
+                                module_funnel_rows.append(
+                                    {
+                                        "Step": label,
+                                        "Control": formatter(control_value),
+                                        "Test": formatter(test_value),
+                                        "% Change": _fmt_module_pct_change(control_value, test_value),
+                                    }
                                 )
-                                for response in response_order:
-                                    response_counts = {}
-                                    response_rates = {}
-                                    for brand_value in BRAND_TEST_VALUES:
-                                        side_response_count = int(
-                                            (
-                                                (interacted_module_df[BRAND_TEST_COL] == brand_value)
-                                                & (
-                                                    interacted_module_df[ECP_MODULE_SELECTION_CLEAN_COL]
-                                                    .map(display_ecp_module_selection)
-                                                    == response
-                                                )
-                                            ).sum()
-                                        )
-                                        response_counts[brand_value] = side_response_count
-                                        response_rates[brand_value] = safe_rate(
-                                            side_response_count,
-                                            side_interacted[brand_value],
-                                        )
-
-                                    module_funnel_rows.append(
-                                        {
-                                            "Step": response,
-                                            "Control": _fmt_module_cell(
-                                                response_counts["control"],
-                                                response_rates["control"],
-                                            ),
-                                            "Test": _fmt_module_cell(
-                                                response_counts["test"],
-                                                response_rates["test"],
-                                            ),
-                                            "% Change": _fmt_module_pct_change(
-                                                response_rates["control"],
-                                                response_rates["test"],
-                                            ),
-                                        }
-                                    )
 
                             module_funnel_table = pd.DataFrame(module_funnel_rows)
                             st.dataframe(
@@ -1700,6 +1994,7 @@ with tab_fmp:
     fmp_header.subheader("Find My Plan", help=fmp_help_base)
 
     fmp_hint_col = site_experience_hint_column(df_raw)
+    fmp_eligible_col = fmp_hint_eligible_column(df_raw)
 
     if fmp_hint_col is None:
         st.info("The loaded call data does not include a site experience hint field.")
@@ -1711,29 +2006,37 @@ with tab_fmp:
         else:
             fmp_base = fmp_base.dropna(subset=["call_date_est"]).copy()
             fmp_base[FMP_DT_COL], fmp_has_time = fmp_datetime_series(fmp_base)
+            fmp_base = fmp_base.dropna(subset=[FMP_DT_COL]).copy()
             fmp_launch_floor = (
                 FMP_LAUNCH_AT
                 if fmp_has_time
                 else pd.Timestamp(FMP_LAUNCH_AT.date())
             )
-            fmp_base = fmp_base[fmp_base[FMP_DT_COL] >= fmp_launch_floor].copy()
+            fmp_pre_start = FMP_LAUNCH_AT - pd.DateOffset(months=1)
+            if not fmp_has_time:
+                fmp_pre_start = pd.Timestamp(fmp_pre_start.date())
 
-            if fmp_base.empty:
-                st.info("No calls are available since the Find My Plan launch.")
+            fmp_analysis_base = fmp_base[fmp_base[FMP_DT_COL] >= fmp_pre_start].copy()
+            fmp_post_base = fmp_base[fmp_base[FMP_DT_COL] >= fmp_launch_floor].copy()
+
+            if fmp_analysis_base.empty:
+                st.info("No Find My Plan analysis data is available with the current filters.")
             else:
-                hint_text = fmp_base[fmp_hint_col].astype("string").fillna("")
-                fmp_df = fmp_base[
+                hint_text = fmp_post_base[fmp_hint_col].astype("string").fillna("")
+                fmp_df = fmp_post_base[
                     hint_text.str.contains(FMP_HINT_PREFIX, case=False, na=False)
                 ].copy()
                 if not fmp_df.empty:
                     fmp_df = add_fmp_recommendation_columns(fmp_df, fmp_hint_col)
 
-                latest_fmp_base_dt = fmp_base[FMP_DT_COL].max()
+                fmp_dt_fmt = "%b %d, %Y %I:%M %p" if fmp_has_time else "%b %d, %Y"
+                latest_fmp_base_dt = fmp_analysis_base[FMP_DT_COL].max()
                 fmp_header.subheader(
                     "Find My Plan",
                     help=(
                         f"{fmp_help_base} Launch window: {FMP_LAUNCH_AT:%b %d, %Y %I:%M %p} "
-                        f"through latest loaded row ({latest_fmp_base_dt:%b %d, %Y %I:%M %p})."
+                        f"through latest loaded row ({latest_fmp_base_dt.strftime(fmp_dt_fmt)}). "
+                        f"Pre-launch comparison starts {fmp_pre_start.strftime(fmp_dt_fmt)}."
                     ),
                 )
 
@@ -1775,7 +2078,7 @@ with tab_fmp:
                     )
                 fmp_same_plan_rate = safe_rate(fmp_same_plan_orders, fmp_orders)
                 fmp_calls = top_funnel_call_count(fmp_df)
-                since_launch_calls = top_funnel_call_count(fmp_base)
+                since_launch_calls = top_funnel_call_count(fmp_post_base)
                 fmp_rec_count = (
                     fmp_df[FMP_REC_TEXT_COL].dropna().nunique()
                     if FMP_REC_TEXT_COL in fmp_df.columns
@@ -1804,6 +2107,327 @@ with tab_fmp:
                         "the recommended plan parsed from the FMP hint."
                     ),
                 )
+
+                st.divider()
+                st.subheader(
+                    "Eligible Pre-Launch vs Hinted Post-Launch",
+                    help=(
+                        f"Compares calls with {fmp_eligible_col or 'fmp_hint_eligible'} = 1 in the month before "
+                        f"launch ({fmp_pre_start.strftime(fmp_dt_fmt)} to before {fmp_launch_floor.strftime(fmp_dt_fmt)}) "
+                        "against calls that actually received a Find My Plan hint after launch."
+                    ),
+                )
+
+                if fmp_eligible_col is None:
+                    st.info("The loaded call data does not include an fmp_hint_eligible field.")
+                else:
+                    fmp_pre_eligible_mask = (
+                        (fmp_analysis_base[FMP_DT_COL] >= fmp_pre_start)
+                        & (fmp_analysis_base[FMP_DT_COL] < fmp_launch_floor)
+                        & bool_like_true_mask(fmp_analysis_base[fmp_eligible_col])
+                    )
+                    fmp_pre_eligible_df = fmp_analysis_base[fmp_pre_eligible_mask].copy()
+                    fmp_post_hinted_df = fmp_df.copy()
+
+                    pre_label = (
+                        f"{FMP_PRE_ELIGIBLE_LABEL} "
+                        f"({fmp_pre_start.strftime('%b %d')} - {fmp_launch_floor.strftime('%b %d')})"
+                    )
+                    post_label = (
+                        f"{FMP_POST_HINT_LABEL} "
+                        f"({fmp_launch_floor.strftime('%b %d')} - {latest_fmp_base_dt.strftime('%b %d')})"
+                    )
+
+                    pre_calls = top_funnel_call_count(fmp_pre_eligible_df)
+                    post_calls = top_funnel_call_count(fmp_post_hinted_df)
+                    pre_nc = compute_funnel_row(fmp_pre_eligible_df, "NC")
+                    post_nc = compute_funnel_row(fmp_post_hinted_df, "NC")
+
+                    fc1, fc2, fc3, fc4 = st.columns(4)
+                    fc1.metric("Pre Eligible Calls", f"{pre_calls:,}")
+                    fc2.metric("Post Hint Calls", f"{post_calls:,}")
+                    fc3.metric("Call Delta", fmt_funnel_delta(pre_calls, post_calls, "count"))
+                    fc4.metric("NC Delta", fmt_funnel_delta(pre_nc, post_nc, "pct"))
+
+                    fmp_ts_parts = []
+                    for cohort_label, cohort_df in [
+                        (FMP_PRE_ELIGIBLE_LABEL, fmp_pre_eligible_df),
+                        (FMP_POST_HINT_LABEL, fmp_post_hinted_df),
+                    ]:
+                        if cohort_df.empty:
+                            continue
+                        ts_source = cohort_df.dropna(subset=[FMP_DT_COL]).copy()
+                        ts_source["period"] = period_labels(ts_source[FMP_DT_COL], time_granularity)
+                        ts_counts = (
+                            ts_source
+                            .groupby("period")
+                            .apply(top_funnel_call_count)
+                            .reset_index(name="Inbound Calls")
+                        )
+                        ts_counts["Cohort"] = cohort_label
+                        fmp_ts_parts.append(ts_counts)
+
+                    if fmp_ts_parts:
+                        fmp_ts = pd.concat(fmp_ts_parts, ignore_index=True)
+                        fmp_ts["period"] = pd.to_datetime(fmp_ts["period"])
+                        fmp_ts = fmp_ts.sort_values(["period", "Cohort"])
+
+                        fig_fmp_ts = go.Figure()
+                        fmp_ts_colors = {
+                            FMP_PRE_ELIGIBLE_LABEL: PLOT_COLORWAY[0],
+                            FMP_POST_HINT_LABEL: PLOT_COLORWAY[1],
+                        }
+                        for cohort_label in [FMP_PRE_ELIGIBLE_LABEL, FMP_POST_HINT_LABEL]:
+                            cohort_ts = fmp_ts[fmp_ts["Cohort"] == cohort_label]
+                            if cohort_ts.empty:
+                                continue
+                            fig_fmp_ts.add_trace(
+                                go.Scatter(
+                                    x=cohort_ts["period"],
+                                    y=cohort_ts["Inbound Calls"],
+                                    name=cohort_label,
+                                    mode="lines+markers",
+                                    line=dict(width=2, color=fmp_ts_colors[cohort_label]),
+                                    marker=dict(size=6, color=fmp_ts_colors[cohort_label]),
+                                    hovertemplate=(
+                                        "%{x|%b %d, %Y}<br>"
+                                        "Inbound calls: %{y:,}<extra>%{fullData.name}</extra>"
+                                    ),
+                                )
+                            )
+
+                        launch_x = fmp_launch_floor.to_pydatetime()
+                        fig_fmp_ts.add_shape(
+                            type="line",
+                            x0=launch_x,
+                            x1=launch_x,
+                            y0=0,
+                            y1=1,
+                            xref="x",
+                            yref="paper",
+                            line=dict(width=1, dash="dash", color=chart_muted()),
+                        )
+                        fig_fmp_ts.add_annotation(
+                            x=launch_x,
+                            y=1,
+                            xref="x",
+                            yref="paper",
+                            text="Launch",
+                            showarrow=False,
+                            yanchor="bottom",
+                            font=dict(size=11, color=chart_muted()),
+                        )
+                        tick_vals = sorted(fmp_ts["period"].dropna().unique().tolist())
+                        tick_text = [
+                            pd.Timestamp(x).strftime(PERIOD_FMT[time_granularity])
+                            for x in tick_vals
+                        ]
+                        apply_chart_theme(
+                            fig_fmp_ts,
+                            title=layout_chart_title("FMP eligible vs hinted call volume"),
+                            xaxis=dict(
+                                tickvals=tick_vals,
+                                ticktext=tick_text,
+                                **plotly_axis_lines(),
+                            ),
+                            yaxis=plotly_axis_extra("Inbound calls", rangemode="tozero"),
+                            height=400,
+                            margin=dict(l=50, r=24, t=56, b=72),
+                            legend=dict(orientation="h", y=-0.22),
+                        )
+                        st.plotly_chart(fig_fmp_ts, **stretch_width_kwargs())
+                    else:
+                        st.info("No eligible pre-launch or hinted post-launch calls are available for the time series.")
+
+                    fmp_compare_rows = []
+                    for metric, fmt in FUNNEL_METRICS:
+                        raw_pre = compute_funnel_row(fmp_pre_eligible_df, metric)
+                        raw_post = compute_funnel_row(fmp_post_hinted_df, metric)
+                        fmp_compare_rows.append(
+                            {
+                                "Metric": metric,
+                                pre_label: fmt_funnel(raw_pre, fmt),
+                                post_label: fmt_funnel(raw_post, fmt),
+                                "Delta (Post - Pre)": fmt_funnel_delta(raw_pre, raw_post, fmt),
+                                "% Change (Post vs Pre)": fmt_pct_change_str(
+                                    pct_change_vs_prior(raw_pre, raw_post)
+                                ),
+                            }
+                        )
+                    fmp_compare_table = pd.DataFrame(fmp_compare_rows)
+                    _fmp_pch_col = "% Change (Post vs Pre)"
+
+                    def _style_fmp_compare_row(row):
+                        out = pd.Series("", index=row.index)
+                        p = parse_display_pct(row[_fmp_pch_col])
+                        if p is not None:
+                            out[_fmp_pch_col] = theme.pct_change_cell_style(row["Metric"], p)
+                        return out
+
+                    st.dataframe(
+                        fmp_compare_table.style.apply(_style_fmp_compare_row, axis=1),
+                        **stretch_width_kwargs(),
+                        hide_index=True,
+                        height=dataframe_display_height(len(fmp_compare_table)),
+                    )
+                    table_export_row(fmp_compare_table, "find_my_plan_pre_post_comparison.csv")
+
+                    fmp_rate_metrics = [
+                        ("CiContact", "Contact Rate"),
+                        ("CiCredit", "Credit Rate"),
+                        ("NC", "Net Conversion"),
+                        ("TPM", "Top Product Mix"),
+                    ]
+                    fmp_rate_pre = [
+                        compute_funnel_row(fmp_pre_eligible_df, metric)
+                        for metric, _ in fmp_rate_metrics
+                    ]
+                    fmp_rate_post = [
+                        compute_funnel_row(fmp_post_hinted_df, metric)
+                        for metric, _ in fmp_rate_metrics
+                    ]
+                    fig_fmp_rates = go.Figure()
+                    rate_labels = [label for _, label in fmp_rate_metrics]
+                    fig_fmp_rates.add_trace(
+                        go.Bar(
+                            name=FMP_PRE_ELIGIBLE_LABEL,
+                            x=rate_labels,
+                            y=fmp_rate_pre,
+                            marker_color=PLOT_COLORWAY[0],
+                            text=[fmt_funnel(v, "pct") for v in fmp_rate_pre],
+                            textposition="outside",
+                            cliponaxis=False,
+                            hovertemplate="%{x}<br>%{y:.1%}<extra>Pre-launch eligible</extra>",
+                        )
+                    )
+                    fig_fmp_rates.add_trace(
+                        go.Bar(
+                            name=FMP_POST_HINT_LABEL,
+                            x=rate_labels,
+                            y=fmp_rate_post,
+                            marker_color=PLOT_COLORWAY[1],
+                            text=[fmt_funnel(v, "pct") for v in fmp_rate_post],
+                            textposition="outside",
+                            cliponaxis=False,
+                            hovertemplate="%{x}<br>%{y:.1%}<extra>Post-launch hinted</extra>",
+                        )
+                    )
+                    apply_chart_theme(
+                        fig_fmp_rates,
+                        title=layout_chart_title("FMP rate comparison"),
+                        yaxis=plotly_axis_extra("Rate", tickformat=".1%", rangemode="tozero"),
+                        xaxis=plotly_axis_extra("Metric", automargin=True),
+                        barmode="group",
+                        height=390,
+                        margin=dict(l=50, r=28, t=56, b=84),
+                        legend=dict(orientation="h", y=-0.24),
+                    )
+                    st.plotly_chart(fig_fmp_rates, **stretch_width_kwargs())
+
+                    fmp_segment_options = {
+                        "Center": "center_location",
+                        "Marketing Bucket": "marketing_bucket",
+                        "Mover / Switcher": "moverSwitcher",
+                        "Tenure Bucket": "tenure_bucket",
+                        "Call Type": "call_type",
+                    }
+                    fmp_segment_options = {
+                        label: col
+                        for label, col in fmp_segment_options.items()
+                        if col in fmp_analysis_base.columns
+                    }
+                    if fmp_segment_options:
+                        seg_labels = list(fmp_segment_options.keys())
+                        default_seg_idx = (
+                            seg_labels.index("Marketing Bucket")
+                            if "Marketing Bucket" in seg_labels
+                            else 0
+                        )
+                        fmp_segment_choice = st.selectbox(
+                            "Segment Comparison",
+                            options=seg_labels,
+                            index=default_seg_idx,
+                            key="fmp_segment_comparison",
+                        )
+                        fmp_segment_col = fmp_segment_options[fmp_segment_choice]
+
+                        pre_seg_df = fmp_pre_eligible_df.copy()
+                        post_seg_df = fmp_post_hinted_df.copy()
+                        for seg_df in [pre_seg_df, post_seg_df]:
+                            seg_df["_fmp_segment"] = (
+                                seg_df[fmp_segment_col]
+                                .astype("string")
+                                .str.strip()
+                                .replace({"": pd.NA, "<NA>": pd.NA})
+                                .fillna("—")
+                            )
+
+                        segment_values = sorted(
+                            set(pre_seg_df["_fmp_segment"].dropna().tolist())
+                            | set(post_seg_df["_fmp_segment"].dropna().tolist()),
+                            key=lambda x: str(x).lower(),
+                        )
+                        fmp_segment_rows = []
+                        for segment in segment_values:
+                            pre_segment_df = pre_seg_df[pre_seg_df["_fmp_segment"] == segment]
+                            post_segment_df = post_seg_df[post_seg_df["_fmp_segment"] == segment]
+                            seg_pre_calls = top_funnel_call_count(pre_segment_df)
+                            seg_post_calls = top_funnel_call_count(post_segment_df)
+                            if seg_pre_calls == 0 and seg_post_calls == 0:
+                                continue
+                            seg_pre_nc = compute_funnel_row(pre_segment_df, "NC")
+                            seg_post_nc = compute_funnel_row(post_segment_df, "NC")
+                            seg_pre_rpnc = compute_funnel_row(pre_segment_df, "RPNC")
+                            seg_post_rpnc = compute_funnel_row(post_segment_df, "RPNC")
+                            seg_pre_rpo = compute_funnel_row(pre_segment_df, "RPO")
+                            seg_post_rpo = compute_funnel_row(post_segment_df, "RPO")
+                            fmp_segment_rows.append(
+                                {
+                                    fmp_segment_choice: segment,
+                                    "Pre Eligible Calls": fmt_funnel(seg_pre_calls, "count"),
+                                    "Post Hint Calls": fmt_funnel(seg_post_calls, "count"),
+                                    "Call % Change": fmt_pct_change_str(
+                                        pct_change_vs_prior(seg_pre_calls, seg_post_calls)
+                                    ),
+                                    "Pre NC": fmt_funnel(seg_pre_nc, "pct"),
+                                    "Post NC": fmt_funnel(seg_post_nc, "pct"),
+                                    "NC Delta": fmt_funnel_delta(seg_pre_nc, seg_post_nc, "pct"),
+                                    "Pre RPNC": fmt_funnel(seg_pre_rpnc, "dollar"),
+                                    "Post RPNC": fmt_funnel(seg_post_rpnc, "dollar"),
+                                    "RPNC Delta": fmt_funnel_delta(seg_pre_rpnc, seg_post_rpnc, "dollar"),
+                                    "Pre RPO": fmt_funnel(seg_pre_rpo, "dollar"),
+                                    "Post RPO": fmt_funnel(seg_post_rpo, "dollar"),
+                                    "RPO Delta": fmt_funnel_delta(seg_pre_rpo, seg_post_rpo, "dollar"),
+                                    "_sort_calls": seg_pre_calls + seg_post_calls,
+                                }
+                            )
+
+                        if fmp_segment_rows:
+                            fmp_segment_table = (
+                                pd.DataFrame(fmp_segment_rows)
+                                .sort_values(["_sort_calls", fmp_segment_choice], ascending=[False, True])
+                                .drop(columns=["_sort_calls"])
+                            )
+
+                            def _style_fmp_segment_row(row):
+                                out = pd.Series("", index=row.index)
+                                p = parse_display_pct(row["Call % Change"])
+                                if p is not None:
+                                    out["Call % Change"] = theme.pct_change_cell_style("Calls", p)
+                                return out
+
+                            st.dataframe(
+                                fmp_segment_table.style.apply(_style_fmp_segment_row, axis=1),
+                                **stretch_width_kwargs(),
+                                hide_index=True,
+                                height=dataframe_display_height(len(fmp_segment_table), cap=1200),
+                            )
+                            table_export_row(
+                                fmp_segment_table,
+                                "find_my_plan_segment_comparison.csv",
+                            )
+                        else:
+                            st.info("No segment comparison rows are available for the selected cohort filters.")
 
                 st.divider()
                 st.subheader("FMP Funnel Since Launch")

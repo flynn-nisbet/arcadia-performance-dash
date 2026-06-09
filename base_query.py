@@ -139,13 +139,12 @@ def get_data():
       ),
 
       fmp_eligible AS (
-        SELECT DISTINCT v.call_id
-        FROM energy_prod.data_science.fmp_base_query fmp
-        JOIN energy_prod.energy.v_calls v
-          ON v.web_session_id = fmp.webcontext_session_id
+        SELECT DISTINCT s.webcontext_anonymous_id AS anonymous_id
+        FROM energy_prod.energy.v_sessions s
+        JOIN energy_prod.data_science.fmp_updated_query fmp
+          ON fmp.webcontext_session_id = s.webcontext_session_id
         WHERE fmp.experience       = 'FMP_LP'
           AND fmp.top_match_name_1 IS NOT NULL
-          AND v.call_id            IS NOT NULL
       )
 
       SELECT
@@ -252,7 +251,7 @@ def get_data():
         bt.brand_test                                                     AS brand_test,
         ms.siteExperienceHint                                             AS site_experience_hint,
         em.ecp_module_selection                                           AS ecp_module_selection,
-        CASE WHEN fe.call_id IS NOT NULL THEN 1 ELSE 0 END                AS fmp_hint_eligible
+        CASE WHEN fe.anonymous_id IS NOT NULL THEN 1 ELSE 0 END           AS fmp_hint_eligible
 
       FROM acf_dedup acf
       LEFT JOIN b_member b
@@ -276,7 +275,7 @@ def get_data():
       LEFT JOIN ecp_module em
         ON em.call_id = acf.call_id
       LEFT JOIN fmp_eligible fe
-        ON fe.call_id = acf.call_id
+        ON fe.anonymous_id = cf.anonymous_id
 
       WHERE COALESCE(acf.agent_name, a.employee_name) NOT IN (
               'Harry Barcia', 'Diane Perez', 'Chris Curry', 'David Loughry'
