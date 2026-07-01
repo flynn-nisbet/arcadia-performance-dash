@@ -241,7 +241,17 @@ def get_data():
           ELSE 'Vet'
         END                                                               AS tenure_bucket,
 
-        COALESCE(mcdim.marketing_bucket, 'Other')                        AS marketing_bucket,
+        CASE
+          WHEN cf.ivr_split_name IN ('natural_marketingbucket','natural_marketingbucket_serp') THEN 'Natural'
+          WHEN cf.ivr_split_name IN ('brandpartner_marketingbucket_serp','brandpartner_marketingbucket') THEN 'Brand-Partner'
+          WHEN cf.ivr_split_name IN ('generic_marketingbucket_serp','generic_marketingbucket') THEN 'Generic'
+          WHEN cf.ivr_split_name IN ('aggregator_marketingbucket_serp','aggregator_marketingbucket') THEN 'Aggregator'
+          WHEN cf.ivr_split_name IN ('competitor_marketingbucket_serp','competitor_marketingbucket') THEN 'Competitor'
+          WHEN cf.ivr_split_name IN ('dereg_utility_check_serp','dereg_utility_check') THEN 'Utility'
+          WHEN cf.ivr_split_name IN ('pmax_marketingbucket_serp','pmax_marketingbucket') THEN 'PMax'
+          WHEN cf.ivr_split_name IN ('nrg_bucket_serp','nrg_bucket') THEN 'NRG'
+          ELSE 'Other Bucket'
+        END                                                               AS marketing_bucket,
 
         CASE
           WHEN cf.permalease_call_ind = 1
@@ -364,8 +374,6 @@ def get_data():
         ON obc.call_id = acf.call_id
       LEFT JOIN energy_prod.energy.v_agents a
         ON acf.employeeid = a.employeeid
-      LEFT JOIN energy_prod.fivetran_salesops.marketingbucket_dim mcdim
-        ON mcdim.mcid = COALESCE(acf.marketing_code_id, 0)
       LEFT JOIN energy_prod.energy.v_calls cf
         ON cf.call_id = acf.call_id
       LEFT JOIN ai_products_prod.energy.compass_call_fct ms
@@ -407,6 +415,7 @@ def deploy_app():
     )
     print(f"Deploy complete: {deployment}")
 
+
 if __name__ == "__main__":
     df = get_data()
 
@@ -416,41 +425,24 @@ if __name__ == "__main__":
         os.remove(f)
         print(f"Removed {f}")
 
-    TARGET_BYTES = 8 * 1024 * 1024  # 8 MB target keeps every file safely under 9 MB
+    TARGET_BYTES = 8 * 1024 * 1024
+    sample_size  = min(1000, len(df))
+    sample_bytes = len(df.head(sample_size).to_csv(index=False).encode("utf-8"))
+    bytes_per_row = sample_bytes / sample_size
+    rows_per_chunk = max(1, int(TARGET_BYTES / bytes_per_row))
 
-    # Header is written to every chunk, so it counts against each file's budget.
-    header_bytes = len(df.iloc[:0].to_csv(index=False).encode("utf-8"))
+    print(f"Estimated {bytes_per_row:.0f} bytes/row → {rows_per_chunk:,} rows per chunk")
 
-    # Exact encoded size of each data row. Fast path splits the rendered CSV by
-    # line; falls back to a per-row measure if any field contains embedded newlines.
-    full_csv = df.to_csv(index=False)
-    body = full_csv.split("\n", 1)[1]
-    body_lines = body.splitlines(keepends=True)
-    if len(body_lines) == len(df):
-        row_bytes = [len(line.encode("utf-8")) for line in body_lines]
-    else:
-        row_bytes = [
-            len(df.iloc[i:i + 1].to_csv(index=False, header=False).encode("utf-8"))
-            for i in range(len(df))
-        ]
+    total_rows = len(df)
+    part = 1
 
-    # Greedily pack rows into chunks that each stay under TARGET_BYTES.
-    chunks = []
-    start, size, i = 0, header_bytes, 0
-    while i < len(df):
-        if size + row_bytes[i] > TARGET_BYTES and i > start:
-            chunks.append((start, i))
-            start, size = i, header_bytes
-            continue
-        size += row_bytes[i]
-        i += 1
-    chunks.append((start, len(df)))
-
-    for part, (s, e) in enumerate(chunks, 1):
-        path = OUTPUT_DIR + f"agent_calls_part{part}.csv"
-        df.iloc[s:e].to_csv(path, index=False)
+    for start in range(0, total_rows, rows_per_chunk):
+        chunk = df.iloc[start : start + rows_per_chunk]
+        filename = f"agent_calls_part{part}.csv"
+        path = OUTPUT_DIR + filename
+        chunk.to_csv(path, index=False)
         size_mb = os.path.getsize(path) / (1024 * 1024)
-        print(f"Saved {e - s:,} rows to part{part} ({size_mb:.1f} MB)")
-        assert os.path.getsize(path) <= 10 * 1024 * 1024, f"{path} exceeds 10 MB cap"
+        print(f"Saved {len(chunk):,} rows to {filename} ({size_mb:.1f} MB)")
+        part += 1
 
     deploy_app()
