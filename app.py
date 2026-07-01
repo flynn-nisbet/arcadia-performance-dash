@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import json
 import re
 import hashlib
+import math
 from datetime import timedelta, date
 from pathlib import Path
 import traceback
@@ -257,6 +258,31 @@ PERIOD_OPTIONS = ["Daily", "Weekly", "Monthly"]
 PERIOD_CODE    = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 PERIOD_FMT     = {"Daily": "%b %d", "Weekly": "%b %d", "Monthly": "%b %Y"}
 
+TENURE_BUCKET_ORDER = [
+    "0-30 day Tenure",
+    "31-60 day Tenure",
+    "61-90 day Tenure",
+    "91-120 day Tenure",
+    "121-150 day Tenure",
+    "Vet",
+]
+TENURE_BUCKET_SORT = {label: i for i, label in enumerate(TENURE_BUCKET_ORDER)}
+
+
+def tenure_bucket_sort_key(value) -> tuple[int, str]:
+    value_s = str(value)
+    if value_s == "Other":
+        return (len(TENURE_BUCKET_ORDER) + 1, value_s)
+    if value_s in {"(missing)", "nan", "None", "<NA>"}:
+        return (len(TENURE_BUCKET_ORDER) + 2, value_s)
+    if value_s in TENURE_BUCKET_SORT:
+        return (TENURE_BUCKET_SORT[value_s], value_s)
+    for label, rank in TENURE_BUCKET_SORT.items():
+        if label in value_s:
+            return (rank, value_s)
+    return (len(TENURE_BUCKET_ORDER) + 3, value_s)
+
+
 # ── Sidebar Filters ────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Filters")
@@ -283,7 +309,7 @@ with st.sidebar:
         st.session_state["_default_center_selection_applied"] = True
     mkt_opts      = sorted(df_raw["marketing_bucket"].dropna().unique().tolist()) if "marketing_bucket" in df_raw.columns else []
     mov_opts      = sorted(df_raw["moverSwitcher"].dropna().unique().tolist()) if "moverSwitcher" in df_raw.columns else []
-    tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist()) if "tenure_bucket" in df_raw.columns else []
+    tenure_opts   = sorted(df_raw["tenure_bucket"].dropna().unique().tolist(), key=tenure_bucket_sort_key) if "tenure_bucket" in df_raw.columns else []
     calltype_opts = sorted(df_raw["call_type"].dropna().unique().tolist()) if "call_type" in df_raw.columns else []
     if SOLD_PROVIDER_COLUMN in df_raw.columns:
         sold_provider_opts = sorted(
@@ -319,10 +345,13 @@ theme.inject_app_styles(light=_arcadia_theme_choice == "Light")
 # Brand bucket names — both spellings seen in production data
 BRAND_BUCKETS = {"Brand Partner", "Brand-Partner", "Competitor", "NRG"}
 BRAND_TEST_LAUNCH_AT = pd.Timestamp("2026-05-27 09:00:00")
+BRAND_TEST_END_AT = pd.Timestamp("2026-06-30 10:00:00")
 BRAND_TEST_VALUES = ("control", "test")
 BRAND_TEST_DISPLAY = {"control": "Control", "test": "Test"}
 BRAND_TEST_COL = "_brand_test_group"
 BRAND_TEST_DT_COL = "_brand_test_dt"
+BRAND_TEST_ISSUE_START = date(2026, 6, 12)
+BRAND_TEST_ISSUE_END = date(2026, 6, 19)
 ECP_MODULE_SELECTION_COL = "ecp_module_selection"
 ECP_MODULE_SELECTION_CLEAN_COL = "_ecp_module_selection_clean"
 ECP_MODULE_SELECTION_MISSING_VALUES = {"", "nan", "none", "null", "<na>"}
@@ -399,6 +428,54 @@ def period_display(label_series, period):
 
 def safe_rate(num, denom):
     return num / denom if denom > 0 else float("nan")
+
+
+TOP_PRODUCT_MIX_COL = "top_product_mix"
+TOP_POINTS_MIX_COL = "top_points_mix"
+LEGACY_TOP_POINTS_MIX_COL = "tpsales_flag"
+PRODUCT_RECOMMENDATION_RAW_COL = "output_value_string"
+PRODUCT_RECOMMENDATION_ID_COLS = (
+    "rec_cat1_product1_id",
+    "rec_cat1_product2_id",
+    "rec_cat2_product1_id",
+    "rec_cat2_product2_id",
+    "rec_cat3_product1_id",
+    "rec_cat3_product2_id",
+)
+
+
+def product_recommendation_mask(d: pd.DataFrame) -> pd.Series:
+    """Rows with product-rank recommendation output available."""
+    if PRODUCT_RECOMMENDATION_RAW_COL in d.columns:
+        raw = d[PRODUCT_RECOMMENDATION_RAW_COL].astype("string").str.strip()
+        raw_key = raw.str.lower()
+        return raw.notna() & ~raw_key.isin({"", "nan", "none", "null", "<na>"})
+    rec_cols = [c for c in PRODUCT_RECOMMENDATION_ID_COLS if c in d.columns]
+    if rec_cols:
+        return d[rec_cols].notna().any(axis=1)
+    return pd.Series(False, index=d.index)
+
+
+def top_product_mix_sales(d: pd.DataFrame, *, points: bool = False) -> float:
+    """Sold-call numerator for top-product mix metrics."""
+    candidates = (
+        (TOP_POINTS_MIX_COL, LEGACY_TOP_POINTS_MIX_COL)
+        if points
+        else (TOP_PRODUCT_MIX_COL,)
+    )
+    col = next((c for c in candidates if c in d.columns), None)
+    if col is None:
+        return 0.0
+    metric_rows = d if points else d[product_recommendation_mask(d)]
+    return float(pd.to_numeric(metric_rows[col], errors="coerce").fillna(0).sum())
+
+
+def top_product_mix_orders(d: pd.DataFrame, *, order_col: str = "orders", points: bool = False) -> float:
+    """Sold-call denominator for top-product mix metrics."""
+    if order_col not in d.columns:
+        return 0.0
+    metric_rows = d if points else d[product_recommendation_mask(d)]
+    return float(pd.to_numeric(metric_rows[order_col], errors="coerce").fillna(0).sum())
 
 
 def top_funnel_mask(d: pd.DataFrame) -> pd.Series:
@@ -612,7 +689,8 @@ def compute_kpis(d):
     n_pass_sale   = int(inbound["passed_credit_sale_flag"].sum()) if "passed_credit_sale_flag" in inbound.columns else 0
     n_fail_sale   = int(inbound["failed_credit_sale_flag"].sum()) if "failed_credit_sale_flag" in inbound.columns else 0
     n_orders      = int(orders_rev_rows["orders"].sum()) if "orders" in orders_rev_rows.columns else 0
-    n_tpsales     = int(orders_rev_rows["tpsales_flag"].sum()) if "tpsales_flag" in orders_rev_rows.columns else 0
+    n_top_product = top_product_mix_sales(orders_rev_rows)
+    n_top_product_orders = top_product_mix_orders(orders_rev_rows)
     total_gcv     = orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0.0
     total_rev     = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else total_gcv
     tt_avg        = inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
@@ -628,7 +706,7 @@ def compute_kpis(d):
         "pass_credit_conv":     safe_rate(n_pass_sale, n_pass_credit),
         "fail_credit_conv":     safe_rate(n_fail_sale, n_fail_credit),
         "net_conversion": safe_rate(n_orders, n_calls),
-        "top_product_mix":safe_rate(n_tpsales, n_orders),
+        "top_product_mix": safe_rate(n_top_product, n_top_product_orders),
         "total_revenue":  total_rev,
         "rev_per_call":   safe_rate(total_rev, n_calls),
         "rev_per_order":  safe_rate(total_rev, n_orders),
@@ -669,7 +747,8 @@ def compute_funnel_row(grp, metric):
     n_pass_sale = inbound["passed_credit_sale_flag"].sum() if "passed_credit_sale_flag" in inbound.columns else 0
     n_fail_sale = inbound["failed_credit_sale_flag"].sum() if "failed_credit_sale_flag" in inbound.columns else 0
     n_orders = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
-    n_tpsales = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
+    n_top_product = top_product_mix_sales(orders_rev_rows)
+    n_top_product_orders = top_product_mix_orders(orders_rev_rows)
     rev = (
         orders_rev_rows["total_revenue"].sum()
         if "total_revenue" in orders_rev_rows.columns
@@ -695,7 +774,7 @@ def compute_funnel_row(grp, metric):
         "PCC": safe_rate(n_pass_sale, n_pass_cr),
         "FCC": safe_rate(n_fail_sale, n_fail_cr),
         "NC": safe_rate(n_orders, n),
-        "TPM": safe_rate(n_tpsales, n_orders),
+        "TPM": safe_rate(n_top_product, n_top_product_orders),
         "Revenue": rev,
         "RPNC": safe_rate(rev, n),
         "RPO": safe_rate(rev, n_orders),
@@ -758,6 +837,86 @@ def fmt_funnel_delta(v1, v2, fmt):
     return f"{v2 - v1:+.2f}"
 
 
+def normal_two_sided_p_value(z):
+    try:
+        z = float(z)
+    except (TypeError, ValueError):
+        return float("nan")
+    if pd.isna(z) or math.isinf(z):
+        return float("nan")
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
+def two_proportion_z_test(x_control, n_control, x_test, n_test):
+    if n_control <= 0 or n_test <= 0:
+        return float("nan"), float("nan")
+    p_control = x_control / n_control
+    p_test = x_test / n_test
+    pooled = (x_control + x_test) / (n_control + n_test)
+    se = math.sqrt(max(pooled * (1.0 - pooled), 0.0) * (1.0 / n_control + 1.0 / n_test))
+    if se <= 0:
+        return (0.0, 1.0) if p_control == p_test else (float("nan"), float("nan"))
+    z = (p_test - p_control) / se
+    return z, normal_two_sided_p_value(z)
+
+
+def difference_in_means_z_test(control_values: pd.Series, test_values: pd.Series):
+    control_values = pd.to_numeric(control_values, errors="coerce").dropna()
+    test_values = pd.to_numeric(test_values, errors="coerce").dropna()
+    if len(control_values) <= 1 or len(test_values) <= 1:
+        return float("nan"), float("nan")
+    mean_control = float(control_values.mean())
+    mean_test = float(test_values.mean())
+    var_control = float(control_values.var(ddof=1))
+    var_test = float(test_values.var(ddof=1))
+    se = math.sqrt(max(var_control, 0.0) / len(control_values) + max(var_test, 0.0) / len(test_values))
+    if se <= 0:
+        return (0.0, 1.0) if mean_control == mean_test else (float("nan"), float("nan"))
+    z = (mean_test - mean_control) / se
+    return z, normal_two_sided_p_value(z)
+
+
+def fmt_p_value(p):
+    if p is None or (isinstance(p, float) and pd.isna(p)):
+        return "—"
+    if p < 0.001:
+        return "<0.001"
+    return f"{p:.3f}"
+
+
+def significance_status(p):
+    if p is None or (isinstance(p, float) and pd.isna(p)):
+        return "Insufficient data"
+    if p <= 0.05:
+        return "At 95%"
+    if p <= 0.10:
+        return "Near 90%"
+    return "Not yet"
+
+
+SIGNIFICANCE_Z_95 = 1.959963984540054
+
+
+def significance_volume_projection(z, n_control: int, n_test: int) -> tuple[str, str]:
+    """Projected calls needed at 95% if the observed lift and allocation hold."""
+    try:
+        z = float(z)
+        n_control = int(n_control)
+        n_test = int(n_test)
+    except (TypeError, ValueError):
+        return "—", "—"
+    if pd.isna(z) or math.isinf(z) or n_control <= 0 or n_test <= 0 or abs(z) <= 0:
+        return "—", "—"
+
+    multiplier = max(1.0, (SIGNIFICANCE_Z_95 / abs(z)) ** 2)
+    needed_control = int(math.ceil(n_control * multiplier))
+    needed_test = int(math.ceil(n_test * multiplier))
+    current_total = n_control + n_test
+    needed_total = needed_control + needed_test
+    additional_total = max(0, needed_total - current_total)
+    return f"{needed_control:,} vs {needed_test:,}", f"{additional_total:,}"
+
+
 def mix_shift_decomposition(w1_frac: np.ndarray, w2_frac: np.ndarray, r1: np.ndarray, r2: np.ndarray) -> dict:
     """Blended = Σ w·r; total change = mix + rate + interaction (same units as r).
 
@@ -812,7 +971,7 @@ tab_overview, tab_volume, tab_agent, tab_current_tests, tab_fail_monitoring, tab
 
 with tab_current_tests:
     tab_brand, tab_fmp = st.tabs([
-        "Branded Flow Test",
+        "Test Tracking",
         "Find My Plan",
     ])
 
@@ -873,6 +1032,82 @@ with tab_overview:
         delta=wk_pct_delta_vs_avg(cv5, bv5),
         delta_color="inverse",
     )
+
+    # ── Last full week comparison table ───────────────────────────────────────
+    _today_est = pd.Timestamp.now(tz="America/New_York").date()
+    _current_week_start = monday_of_week_containing(_today_est)
+    _this_week_start = _current_week_start - timedelta(days=7)
+    _this_week_end = _current_week_start - timedelta(days=1)
+    _last_week_start = _this_week_start - timedelta(days=7)
+    _last_week_end = _this_week_start - timedelta(days=1)
+    _p4wa_start = _this_week_start - timedelta(days=28)
+    _p4wa_end = _this_week_start - timedelta(days=1)
+
+    st.subheader(
+        "Last Full Week Comparison",
+        help=(
+            f"P4WA: {_p4wa_start:%b %d}–{_p4wa_end:%b %d, %Y}; "
+            f"Last Week: {_last_week_start:%b %d}–{_last_week_end:%b %d, %Y}; "
+            f"This Week: {_this_week_start:%b %d}–{_this_week_end:%b %d, %Y}. "
+            "Ignores sidebar Date Range; other sidebar filters apply. "
+            "P4WA Calls and Revenue are divided by 4; other P4WA metrics are pooled over the full four-week window."
+        ),
+    )
+
+    def _slice_overview_week(d_all: pd.DataFrame, start_d: date, end_d: date) -> pd.DataFrame:
+        if "call_date_est" not in d_all.columns:
+            return d_all.iloc[0:0]
+        m = (d_all["call_date_est"].dt.date >= start_d) & (d_all["call_date_est"].dt.date <= end_d)
+        return d_all.loc[m]
+
+    def _overview_week_metric(source: pd.DataFrame, metric: str, *, p4wa: bool = False):
+        value = compute_funnel_row(source, metric)
+        if p4wa and metric in {"Calls", "Revenue"}:
+            return value / 4.0
+        return value
+
+    def _fmt_weekly_comp(value, metric: str, fmt: str, *, p4wa: bool = False) -> str:
+        if p4wa and metric == "Calls" and value is not None and not pd.isna(value):
+            return f"{value:,.1f}"
+        return fmt_funnel(value, fmt)
+
+    _p4wa_df = _slice_overview_week(_df_no_dr, _p4wa_start, _p4wa_end)
+    _last_week_df = _slice_overview_week(_df_no_dr, _last_week_start, _last_week_end)
+    _this_week_df = _slice_overview_week(_df_no_dr, _this_week_start, _this_week_end)
+
+    _weekly_rows = []
+    for metric, fmt in FUNNEL_METRICS:
+        p4wa_raw = _overview_week_metric(_p4wa_df, metric, p4wa=True)
+        last_week_raw = _overview_week_metric(_last_week_df, metric)
+        this_week_raw = _overview_week_metric(_this_week_df, metric)
+        _weekly_rows.append(
+            {
+                "Metric": metric,
+                "P4WA": _fmt_weekly_comp(p4wa_raw, metric, fmt, p4wa=True),
+                "Last Week": _fmt_weekly_comp(last_week_raw, metric, fmt),
+                "This Week": _fmt_weekly_comp(this_week_raw, metric, fmt),
+                "WoW": fmt_pct_change_str(pct_change_vs_prior(last_week_raw, this_week_raw)),
+                "vP4WA": fmt_pct_change_str(pct_change_vs_prior(p4wa_raw, this_week_raw)),
+            }
+        )
+
+    _weekly_comp_table = pd.DataFrame(_weekly_rows)
+
+    def _style_weekly_comp_row(row):
+        out = pd.Series("", index=row.index)
+        for col in ("WoW", "vP4WA"):
+            p = parse_display_pct(row.get(col))
+            if p is not None:
+                out[col] = theme.pct_change_cell_style(row["Metric"], p)
+        return out
+
+    st.dataframe(
+        _weekly_comp_table.style.apply(_style_weekly_comp_row, axis=1),
+        **stretch_width_kwargs(),
+        hide_index=True,
+        height=dataframe_display_height(len(_weekly_comp_table)),
+    )
+    table_export_row(_weekly_comp_table, "last_full_week_comparison.csv")
 
     st.divider()
 
@@ -1065,7 +1300,7 @@ with tab_overview:
         "Total Revenue":       ("total_revenue",              None,                  "dollar"),
         "Rev / Call":          ("total_revenue",              "n_calls",             "dollar"),
         "Rev / Order":         ("total_revenue",              "n_orders",            "dollar"),
-        "Top Product Mix":     ("tpsales_flag",               "orders",              "pct"),
+        "Top Product Mix":     (TOP_PRODUCT_MIX_COL,          "orders",              "pct"),
         "Contact Rate":        ("ib_contact_calls",           "n_calls",             "pct"),
         "Credit Rate":         ("credit_calls_flag",          "n_calls",             "pct"),
         "Passed Credit Rate":  ("passed_credit_call_flag",    "credit_calls_flag",   "pct"),
@@ -1098,8 +1333,8 @@ with tab_overview:
                 num = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
                 return safe_rate(num, top_funnel_call_count(grp))
             elif ov_metric_choice == "Top Product Mix":
-                num = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
-                denom = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
+                num = top_product_mix_sales(orders_rev_rows)
+                denom = top_product_mix_orders(orders_rev_rows)
                 return safe_rate(num, denom)
             elif fmt_ov == "pct":
                 if num_col_ov not in inbound.columns:
@@ -1511,13 +1746,14 @@ with tab_fail_monitoring:
                     table_export_row(fail_call_table, "pitch_fail_calls.csv")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB — BRANDED FLOW TEST
+# TAB — TEST TRACKING
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_brand:
     st.subheader(
-        "Branded Flow Test",
+        "Test Tracking",
         help=(
-            "Compares calls where **brand_test** is `control` vs `test`. "
+            "Compares branded-flow calls where **brand_test** is `control` vs `test` "
+            f"from launch through test end ({BRAND_TEST_END_AT:%b %d, %Y %I:%M %p}). "
             "The sidebar Date Range is ignored; other sidebar filters still apply."
         ),
     )
@@ -1556,16 +1792,34 @@ with tab_brand:
                     if brand_has_time
                     else pd.Timestamp(BRAND_TEST_LAUNCH_AT.date())
                 )
-                brand_base = brand_base[brand_base[BRAND_TEST_DT_COL] >= launch_floor].copy()
+                test_end_ceiling = (
+                    BRAND_TEST_END_AT
+                    if brand_has_time
+                    else pd.Timestamp(BRAND_TEST_END_AT.date())
+                )
+                brand_base = brand_base[
+                    (brand_base[BRAND_TEST_DT_COL] >= launch_floor) &
+                    (brand_base[BRAND_TEST_DT_COL] <= test_end_ceiling)
+                ].copy()
 
                 if brand_base.empty:
-                    st.info("No control/test branded-flow calls are available since launch.")
+                    st.info("No control/test branded-flow calls are available during the test window.")
                 else:
                     max_brand_dt = brand_base[BRAND_TEST_DT_COL].max()
                     min_brand_date = BRAND_TEST_LAUNCH_AT.date()
-                    max_brand_date = max_brand_dt.date()
+                    max_brand_date = min(max_brand_dt.date(), BRAND_TEST_END_AT.date())
                     if max_brand_date < min_brand_date:
                         max_brand_date = min_brand_date
+                    launch_display = (
+                        launch_floor.strftime("%b %d, %Y %I:%M %p")
+                        if brand_has_time else
+                        launch_floor.strftime("%b %d, %Y")
+                    )
+                    test_end_display = (
+                        test_end_ceiling.strftime("%b %d, %Y %I:%M %p")
+                        if brand_has_time else
+                        test_end_ceiling.strftime("%b %d, %Y")
+                    )
 
                     _BRAND_DATE_KEY = "brand_flow_date_range"
                     _brand_default_range = (min_brand_date, max_brand_date)
@@ -1587,10 +1841,17 @@ with tab_brand:
                         max_value=max_brand_date,
                         key=_BRAND_DATE_KEY,
                         help=(
-                            "Defaults to launch: May 27, 2026 at 9:00 AM through "
-                            "the latest loaded branded-flow row. "
-                            f"Current default launch window: {BRAND_TEST_LAUNCH_AT:%b %d, %Y %I:%M %p} "
-                            f"through latest loaded branded-flow row ({max_brand_dt:%b %d, %Y %I:%M %p})."
+                            "Defaults to the full branded-flow test window. "
+                            f"Current default window: {launch_display} through {test_end_display}."
+                        ),
+                    )
+                    exclude_brand_issue_window = st.checkbox(
+                        "Exclude Jun 12-Jun 19, 2026 issue window",
+                        value=True,
+                        key="brand_flow_exclude_issue_window",
+                        help=(
+                            "Removes calls from June 12 through June 19, 2026 from the branded-flow "
+                            "comparison because the test had a known issue during that window."
                         ),
                     )
 
@@ -1616,6 +1877,22 @@ with tab_brand:
                         brand_df = brand_base.iloc[0:0].copy()
                     else:
                         brand_df = _slice_brand_dates(brand_base, brand_date_range)
+                        if exclude_brand_issue_window and not brand_df.empty:
+                            issue_start = pd.Timestamp(BRAND_TEST_ISSUE_START)
+                            issue_end_exclusive = pd.Timestamp(BRAND_TEST_ISSUE_END) + pd.Timedelta(days=1)
+                            before_issue_exclusion = len(brand_df)
+                            brand_df = brand_df[
+                                ~(
+                                    (brand_df[BRAND_TEST_DT_COL] >= issue_start) &
+                                    (brand_df[BRAND_TEST_DT_COL] < issue_end_exclusive)
+                                )
+                            ].copy()
+                            removed_issue_rows = before_issue_exclusion - len(brand_df)
+                            if removed_issue_rows:
+                                st.caption(
+                                    f"Excluded {removed_issue_rows:,} branded-flow rows from "
+                                    f"{BRAND_TEST_ISSUE_START:%b %d} through {BRAND_TEST_ISSUE_END:%b %d, %Y}."
+                                )
 
                     if not brand_df.empty:
                         control_df = brand_df[brand_df[BRAND_TEST_COL] == "control"]
@@ -1660,6 +1937,156 @@ with tab_brand:
                             height=dataframe_display_height(len(brand_table)),
                         )
                         table_export_row(brand_table, "branded_flow_test_funnel.csv")
+
+                        st.subheader(
+                            "Significance Meter",
+                            help=(
+                                "Current branded-flow window. CiCredit and NC use two-sided two-proportion z-tests. "
+                                "RPNC uses a large-sample two-sided test on inbound per-call revenue. "
+                                "Needed volume assumes the observed lift, variance, and control/test allocation hold."
+                            ),
+                        )
+
+                        def _brand_inbound(source: pd.DataFrame) -> pd.DataFrame:
+                            return source[top_funnel_mask(source)]
+
+                        def _sum_numeric(source: pd.DataFrame, col: str) -> float:
+                            if col not in source.columns:
+                                return 0.0
+                            return float(pd.to_numeric(source[col], errors="coerce").fillna(0).sum())
+
+                        def _significance_row(
+                            metric: str,
+                            control_value: float,
+                            test_value: float,
+                            delta: str,
+                            sample: str,
+                            z_score: float,
+                            p_value: float,
+                            n_control: int,
+                            n_test: int,
+                            value_fmt: str,
+                        ) -> dict:
+                            confidence = (
+                                max(0.0, min(100.0, (1.0 - float(p_value)) * 100.0))
+                                if p_value is not None and not pd.isna(p_value)
+                                else float("nan")
+                            )
+                            needed_at_95, additional_at_95 = significance_volume_projection(
+                                z_score,
+                                n_control,
+                                n_test,
+                            )
+                            return {
+                                "Metric": metric,
+                                "Control": fmt_funnel(control_value, value_fmt),
+                                "Test": fmt_funnel(test_value, value_fmt),
+                                "Delta": delta,
+                                "Lift": fmt_pct_change_str(pct_change_vs_prior(control_value, test_value)),
+                                "Sample": sample,
+                                "p-value": fmt_p_value(p_value),
+                                "Confidence": confidence,
+                                "Status": significance_status(p_value),
+                                "Needed @95%": needed_at_95,
+                                "Add'l Calls @95%": additional_at_95,
+                            }
+
+                        def _proportion_significance_row(metric: str, num_col: str | None = None) -> dict:
+                            control_inbound = _brand_inbound(control_df)
+                            test_inbound = _brand_inbound(test_df)
+                            n_control = top_funnel_call_count(control_df)
+                            n_test = top_funnel_call_count(test_df)
+                            if metric == "NC":
+                                x_control = _sum_numeric(control_df[order_revenue_mask(control_df)], "orders")
+                                x_test = _sum_numeric(test_df[order_revenue_mask(test_df)], "orders")
+                            else:
+                                x_control = _sum_numeric(control_inbound, num_col or "")
+                                x_test = _sum_numeric(test_inbound, num_col or "")
+                            control_value = safe_rate(x_control, n_control)
+                            test_value = safe_rate(x_test, n_test)
+                            z_score, p_value = two_proportion_z_test(x_control, n_control, x_test, n_test)
+                            delta = (
+                                f"{(test_value - control_value) * 100:+.2f} ppt"
+                                if pd.notna(control_value) and pd.notna(test_value)
+                                else "—"
+                            )
+                            sample = f"{int(round(x_control)):,}/{n_control:,} vs {int(round(x_test)):,}/{n_test:,}"
+                            return _significance_row(
+                                metric,
+                                control_value,
+                                test_value,
+                                delta,
+                                sample,
+                                z_score,
+                                p_value,
+                                n_control,
+                                n_test,
+                                "pct",
+                            )
+
+                        def _rpnc_values(source: pd.DataFrame) -> pd.Series:
+                            inbound = _brand_inbound(source)
+                            rev_col = "total_revenue" if "total_revenue" in inbound.columns else "gcv_fo"
+                            if rev_col not in inbound.columns:
+                                return pd.Series(dtype=float)
+                            return pd.to_numeric(inbound[rev_col], errors="coerce").fillna(0.0)
+
+                        rpnc_control_values = _rpnc_values(control_df)
+                        rpnc_test_values = _rpnc_values(test_df)
+                        rpnc_control = (
+                            float(rpnc_control_values.mean())
+                            if not rpnc_control_values.empty
+                            else float("nan")
+                        )
+                        rpnc_test = (
+                            float(rpnc_test_values.mean())
+                            if not rpnc_test_values.empty
+                            else float("nan")
+                        )
+                        rpnc_z_score, rpnc_p_value = difference_in_means_z_test(
+                            rpnc_control_values,
+                            rpnc_test_values,
+                        )
+                        rpnc_delta = (
+                            f"${rpnc_test - rpnc_control:+,.2f}"
+                            if pd.notna(rpnc_control) and pd.notna(rpnc_test)
+                            else "—"
+                        )
+
+                        sig_table = pd.DataFrame(
+                            [
+                                _proportion_significance_row("CiCredit", "credit_calls_flag"),
+                                _proportion_significance_row("NC"),
+                                _significance_row(
+                                    "RPNC",
+                                    rpnc_control,
+                                    rpnc_test,
+                                    rpnc_delta,
+                                    f"{len(rpnc_control_values):,} vs {len(rpnc_test_values):,} calls",
+                                    rpnc_z_score,
+                                    rpnc_p_value,
+                                    len(rpnc_control_values),
+                                    len(rpnc_test_values),
+                                    "dollar",
+                                ),
+                            ]
+                        )
+
+                        st.dataframe(
+                            sig_table,
+                            **stretch_width_kwargs(),
+                            hide_index=True,
+                            height=dataframe_display_height(len(sig_table), min_rows=3),
+                            column_config={
+                                "Confidence": st.column_config.ProgressColumn(
+                                    "Confidence",
+                                    min_value=0,
+                                    max_value=100,
+                                    format="%.1f%%",
+                                ),
+                            },
+                        )
+                        table_export_row(sig_table, "branded_flow_significance.csv")
 
                         st.divider()
                         st.subheader("Trend Over Time")
@@ -1706,7 +2133,7 @@ with tab_brand:
                             "Total Revenue":       ("total_revenue",              None,                  "dollar"),
                             "Rev / Call":          ("total_revenue",              "n_calls",             "dollar"),
                             "Rev / Order":         ("total_revenue",              "n_orders",            "dollar"),
-                            "Top Product Mix":     ("tpsales_flag",               "orders",              "pct"),
+                            "Top Product Mix":     (TOP_PRODUCT_MIX_COL,          "orders",              "pct"),
                             "Contact Rate":        ("ib_contact_calls",           "n_calls",             "pct"),
                             "Credit Rate":         ("credit_calls_flag",          "n_calls",             "pct"),
                             "Passed Credit Rate":  ("passed_credit_call_flag",    "credit_calls_flag",   "pct"),
@@ -1762,16 +2189,8 @@ with tab_brand:
                                 )
                                 return safe_rate(num, top_funnel_call_count(grp))
                             elif brand_metric_choice == "Top Product Mix":
-                                num = (
-                                    orders_rev_rows["tpsales_flag"].sum()
-                                    if "tpsales_flag" in orders_rev_rows.columns
-                                    else 0
-                                )
-                                denom = (
-                                    orders_rev_rows["orders"].sum()
-                                    if "orders" in orders_rev_rows.columns
-                                    else 0
-                                )
+                                num = top_product_mix_sales(orders_rev_rows)
+                                denom = top_product_mix_orders(orders_rev_rows)
                                 return safe_rate(num, denom)
                             elif fmt_bt == "pct":
                                 if num_col_bt not in inbound.columns:
@@ -2677,10 +3096,21 @@ with tab_volume:
             return pd.Series(np.where(brand_mask, "Brand", "Non-Brand"), index=df.index)
         if dim_col not in df.columns:
             return pd.Series("(missing)", index=df.index)
+        if dim_col == "tenure_bucket":
+            return df[dim_col].fillna("(missing)").astype(str)
         return _vol_topn_labels(df[dim_col], top_n)
 
     def _vol_uses_sold_partner_dim(dim_col: str, dim2_col: str = "") -> bool:
         return dim_col == SOLD_PROVIDER_COLUMN or dim2_col == SOLD_PROVIDER_COLUMN
+
+    def _vol_uses_tenure_dim(dim_col: str, dim2_col: str = "") -> bool:
+        return dim_col == "tenure_bucket" or dim2_col == "tenure_bucket"
+
+    def _vol_category_sort_key(value):
+        if _vol_uses_tenure_dim(vol_dim_col, vol_dim2_col):
+            return tenure_bucket_sort_key(value)
+        value_s = str(value)
+        return (value_s == "Other", value_s)
 
     def _vol_sold_partner_frame(base: pd.DataFrame) -> pd.DataFrame:
         if base is None:
@@ -2738,6 +3168,8 @@ with tab_volume:
             return pd.DataFrame()
         ct["period"] = pd.to_datetime(ct["period"])
         pivot = ct.pivot(index="period", columns="_lbl", values="val").fillna(0)
+        if _vol_uses_tenure_dim(dim_col, dim2_col):
+            pivot = pivot.reindex(columns=sorted(pivot.columns, key=tenure_bucket_sort_key))
         return pivot.sort_index()
 
     v_ts = _vol_inbound_frame(df)
@@ -2930,7 +3362,7 @@ with tab_volume:
 
                 n1 = _vol_mix_counts(g1)
                 n2 = _vol_mix_counts(g2)
-                union_ix = sorted(set(n1.index.astype(str)) | set(n2.index.astype(str)), key=lambda x: (x == "Other", x))
+                union_ix = sorted(set(n1.index.astype(str)) | set(n2.index.astype(str)), key=_vol_category_sort_key)
                 n1a = n1.reindex(union_ix).fillna(0)
                 n2a = n2.reindex(union_ix).fillna(0)
                 t1 = float(n1a.sum()) or 1.0
@@ -3293,7 +3725,8 @@ with tab_agent:
             orders_rev_rows = g[order_revenue_mask(g)]
             n = top_funnel_call_count(g)
             n_orders  = orders_rev_rows["orders"].sum() if "orders" in orders_rev_rows.columns else 0
-            n_tpsales = orders_rev_rows["tpsales_flag"].sum() if "tpsales_flag" in orders_rev_rows.columns else 0
+            n_top_product = top_product_mix_sales(orders_rev_rows)
+            n_top_product_orders = top_product_mix_orders(orders_rev_rows)
             rev       = orders_rev_rows["total_revenue"].sum() if "total_revenue" in orders_rev_rows.columns else orders_rev_rows["gcv_fo"].sum() if "gcv_fo" in orders_rev_rows.columns else 0
             tt_all    = inbound["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
             tt_sold   = inbound[inbound["orders"] > 0]["talk_time_minutes"].mean() if "talk_time_minutes" in inbound.columns else float("nan")
@@ -3306,7 +3739,7 @@ with tab_agent:
                 "Membership":      cohort,
                 "Tenure":          tenure,
                 "Net Conv.":       safe_rate(n_orders, n),
-                "Top Product Mix": safe_rate(n_tpsales, n_orders),
+                "Top Product Mix": safe_rate(n_top_product, n_top_product_orders),
                 "Total Revenue":   rev,
                 "Rev / Call":      safe_rate(rev, n),
                 "Rev / Order":     safe_rate(rev, n_orders),
@@ -3417,6 +3850,7 @@ with tab_lift:
         ("pass_credit_conv",  "Passed Credit Conv.", "pct"),
         ("fail_credit_conv",  "Failed Credit Conv.", "pct"),
         ("nc",                "Net Conversion",      "pct"),
+        ("tpm",               "Top Product Mix",     "pct"),
         ("rpo",               "RPO",                 "dollar"),
         ("rpnc",              "RPNC",                "dollar"),
         ("tt",                "Talk Time",           "decimal"),
@@ -3467,7 +3901,8 @@ with tab_lift:
         df["call_date_fo"]      = pd.to_datetime(df["call_date_fo"])
         for col in ["talk_time_minutes", "order_orders", "gcv_revenue", "ibcalls",
                     "credit_calls_ind", "passed_credit_call_ind", "ib_contact_calls",
-                    "passed_credit_sale", "failed_credit_sale"]:
+                    "passed_credit_sale", "failed_credit_sale",
+                    TOP_POINTS_MIX_COL, LEGACY_TOP_POINTS_MIX_COL]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
@@ -3610,6 +4045,7 @@ with tab_lift:
 
         net_call      = int(ib_mask.sum())
         orders        = orders_rev_rows["order_orders"].sum() if "order_orders" in orders_rev_rows.columns else 0
+        top_points    = top_product_mix_sales(orders_rev_rows, points=True)
         revenue       = orders_rev_rows["gcv_revenue"].sum() if "gcv_revenue" in orders_rev_rows.columns else 0
         tt_avg        = safe_rate(ib_d["talk_time_minutes"].sum(), net_call)
         contact_calls = ib_d["ib_contact_calls"].sum()       if "ib_contact_calls"       in d.columns else 0
@@ -3641,6 +4077,7 @@ with tab_lift:
             "pass_credit_conv": safe_rate(pass_cr_sold,  pass_cr_calls),
             "fail_credit_conv": safe_rate(fail_cr_sold,  fail_cr_calls),
             "nc":               safe_rate(orders,        net_call),
+            "tpm":              safe_rate(top_points,    orders),
             "rpo":              safe_rate(revenue,       orders),
             "rpnc":             rpnc,
             "tt":               tt_avg,

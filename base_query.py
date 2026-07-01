@@ -88,6 +88,48 @@ def get_data():
         WHERE rn = 1
       ),
 
+      pitch_fail AS (
+        SELECT
+          call_id,
+          TRUE AS pitch_fail_pageview,
+          CASE
+            WHEN MAX(CASE WHEN ev = 'P' THEN ts END) IS NULL THEN FALSE
+            WHEN unix_timestamp(MAX(CASE WHEN ev = 'P' THEN ts END))
+               > unix_timestamp(MAX(CASE WHEN ev = 'F' THEN ts END)) THEN TRUE
+            ELSE FALSE
+          END AS pitch_fail_resolved
+        FROM (
+          SELECT
+            callId      AS call_id,
+            _timeStamp  AS ts,
+            CASE WHEN parentPageName = '06c_product_pitch_model_failure' THEN 'F' ELSE 'P' END AS ev
+          FROM lakehouse_production.energy.event_arcadia_pageviewed
+          WHERE parentPageName IN (
+              '06_product_pitch',
+              '06_product_pitch_payless',
+              '06_product_pitch_prepaid',
+              '06c_product_pitch_model_failure'
+            )
+            AND `_date` >= (SELECT from_date_est FROM params)
+            AND callId IS NOT NULL
+        ) pitch_events
+        GROUP BY call_id
+        HAVING MAX(CASE WHEN ev = 'F' THEN 1 ELSE 0 END) = 1
+      ),
+
+      pitch_any AS (
+        SELECT DISTINCT callId AS call_id
+        FROM lakehouse_production.energy.event_arcadia_pageviewed
+        WHERE parentPageName IN (
+            '06_product_pitch',
+            '06_product_pitch_payless',
+            '06_product_pitch_prepaid',
+            '06c_product_pitch_model_failure'
+          )
+          AND `_date` >= (SELECT from_date_est FROM params)
+          AND callId IS NOT NULL
+      ),
+
       short_call_anchor AS (
         SELECT
           short.call_id                                                          AS short_call_id,
@@ -126,6 +168,7 @@ def get_data():
           COUNT(DISTINCT o.order_id)                                                       AS orders,
           SUM(COALESCE(o.gcv_v2, 0))                                                      AS gcv_fo,
           MAX(o.product_name)                                                              AS product_name,
+          MAX(o.product_id)                                                                AS sold_product_id,
           MAX(o.partner_name)                                                              AS partner_name
         FROM energy_prod.energy.v_orders o
         INNER JOIN acf_dedup acf ON acf.call_id = o.call_id
@@ -139,12 +182,36 @@ def get_data():
       ),
 
       fmp_eligible AS (
-        SELECT DISTINCT s.webcontext_anonymous_id AS anonymous_id
-        FROM energy_prod.energy.v_sessions s
-        JOIN energy_prod.data_science.fmp_updated_query fmp
-          ON fmp.webcontext_session_id = s.webcontext_session_id
+        SELECT DISTINCT v.call_id
+        FROM energy_prod.data_science.fmp_base_query fmp
+        JOIN energy_prod.energy.v_calls v
+          ON v.web_session_id = fmp.webcontext_session_id
         WHERE fmp.experience       = 'FMP_LP'
           AND fmp.top_match_name_1 IS NOT NULL
+          AND v.call_id            IS NOT NULL
+      ),
+
+      -- Recommended products from the agent-assist product-rank model.
+      -- Joins on correlationId = call_id. The outputValueString is a JSON string.
+      -- product_category_1 is the top-ranked category; within a category product_1 > product_2.
+      product_rank AS (
+        SELECT
+          correlationId AS call_id,
+          outputValueString                                                                          AS output_value_string,
+          get_json_object(outputValueString, '$.data[0].product_category_1.product_1.product_id')    AS rec_cat1_product1_id,
+          get_json_object(outputValueString, '$.data[0].product_category_1.product_2.product_id')    AS rec_cat1_product2_id,
+          get_json_object(outputValueString, '$.data[0].product_category_2.product_1.product_id')    AS rec_cat2_product1_id,
+          get_json_object(outputValueString, '$.data[0].product_category_2.product_2.product_id')    AS rec_cat2_product2_id,
+          get_json_object(outputValueString, '$.data[0].product_category_3.product_1.product_id')    AS rec_cat3_product1_id,
+          get_json_object(outputValueString, '$.data[0].product_category_3.product_2.product_id')    AS rec_cat3_product2_id
+        FROM lakehouse_production.ai_products.raw_model_evaluated
+        WHERE modelFieldName = 'agent-assist-product-rank'
+          AND correlationId IS NOT NULL
+          AND `_date` >= (SELECT from_date_est FROM params)
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY correlationId
+          ORDER BY _timeStamp DESC
+        ) = 1
       )
 
       SELECT
@@ -232,11 +299,40 @@ def get_data():
         COALESCE(obc.gcv_fo, 0)                                          AS total_revenue,
         obc.product_name                                                  AS product_name,
         obc.partner_name                                                  AS partner_name,
+        obc.sold_product_id                                               AS sold_product_id,
 
+        -- Recommended product ids (NULL when no model row found)
+        pr.rec_cat1_product1_id                                           AS rec_cat1_product1_id,
+        pr.rec_cat1_product2_id                                           AS rec_cat1_product2_id,
+        pr.rec_cat2_product1_id                                           AS rec_cat2_product1_id,
+        pr.rec_cat2_product2_id                                           AS rec_cat2_product2_id,
+        pr.rec_cat3_product1_id                                           AS rec_cat3_product1_id,
+        pr.rec_cat3_product2_id                                           AS rec_cat3_product2_id,
+
+        -- Raw model output JSON for this call (NULL when no model row found)
+        pr.output_value_string                                            AS output_value_string,
+
+        -- top_product_mix: for sold calls, 1 if the sold product is one of the
+        -- top 4 recommendations -- both plans from the top category, plus the first
+        -- plan of each of the other two categories -- else 0. Unsold calls = 0.
         CASE
-          WHEN obc.partner_name IN ('TXU Energy', 'TriEagle Energy', 'Octopus Energy') THEN 1
-          ELSE 0
+          WHEN COALESCE(obc.orders, 0) > 0
+               AND obc.sold_product_id IN (
+                 pr.rec_cat1_product1_id,
+                 pr.rec_cat1_product2_id,
+                 pr.rec_cat2_product1_id,
+                 pr.rec_cat3_product1_id
+               )
+          THEN 1 ELSE 0
         END                                                               AS top_product_mix,
+
+        -- top_points_mix: a sale worth at least 25 points, using the call's
+        -- total_points. Independent of the recommendations. Unsold calls = 0.
+        CASE
+          WHEN COALESCE(obc.orders, 0) > 0
+               AND COALESCE(acf.total_points, 0) >= 25
+          THEN 1 ELSE 0
+        END                                                               AS top_points_mix,
 
         acf.talk_time_seconds / 60.0                                     AS talk_time_minutes,
         CASE WHEN COALESCE(obc.orders, 0) > 0 THEN acf.talk_time_seconds / 60.0 END AS talk_time_minutes_sold,
@@ -251,7 +347,11 @@ def get_data():
         bt.brand_test                                                     AS brand_test,
         ms.siteExperienceHint                                             AS site_experience_hint,
         em.ecp_module_selection                                           AS ecp_module_selection,
-        CASE WHEN fe.anonymous_id IS NOT NULL THEN 1 ELSE 0 END           AS fmp_hint_eligible
+        CASE WHEN fe.call_id IS NOT NULL THEN 1 ELSE 0 END                AS fmp_hint_eligible,
+
+        CASE WHEN pa.call_id IS NOT NULL THEN 1 ELSE 0 END                AS pitch_pageview,
+        CASE WHEN pf.call_id IS NOT NULL THEN 1 ELSE 0 END                AS pitch_fail_pageview,
+        CASE WHEN COALESCE(pf.pitch_fail_resolved, FALSE) THEN 1 ELSE 0 END AS pitch_fail_resolved
 
       FROM acf_dedup acf
       LEFT JOIN b_member b
@@ -275,7 +375,13 @@ def get_data():
       LEFT JOIN ecp_module em
         ON em.call_id = acf.call_id
       LEFT JOIN fmp_eligible fe
-        ON fe.anonymous_id = cf.anonymous_id
+        ON fe.call_id = acf.call_id
+      LEFT JOIN pitch_fail pf
+        ON pf.call_id = acf.call_id
+      LEFT JOIN pitch_any pa
+        ON pa.call_id = acf.call_id
+      LEFT JOIN product_rank pr
+        ON pr.call_id = acf.call_id
 
       WHERE COALESCE(acf.agent_name, a.employee_name) NOT IN (
               'Harry Barcia', 'Diane Perez', 'Chris Curry', 'David Loughry'
@@ -286,7 +392,6 @@ def get_data():
     """
 
     return spark.sql(query).toPandas()
-
 
 def deploy_app():
     from databricks.sdk import WorkspaceClient
@@ -302,7 +407,6 @@ def deploy_app():
     )
     print(f"Deploy complete: {deployment}")
 
-
 if __name__ == "__main__":
     df = get_data()
 
@@ -312,24 +416,41 @@ if __name__ == "__main__":
         os.remove(f)
         print(f"Removed {f}")
 
-    TARGET_BYTES = 8 * 1024 * 1024
-    sample_size  = min(1000, len(df))
-    sample_bytes = len(df.head(sample_size).to_csv(index=False).encode("utf-8"))
-    bytes_per_row = sample_bytes / sample_size
-    rows_per_chunk = max(1, int(TARGET_BYTES / bytes_per_row))
+    TARGET_BYTES = 8 * 1024 * 1024  # 8 MB target keeps every file safely under 9 MB
 
-    print(f"Estimated {bytes_per_row:.0f} bytes/row → {rows_per_chunk:,} rows per chunk")
+    # Header is written to every chunk, so it counts against each file's budget.
+    header_bytes = len(df.iloc[:0].to_csv(index=False).encode("utf-8"))
 
-    total_rows = len(df)
-    part = 1
+    # Exact encoded size of each data row. Fast path splits the rendered CSV by
+    # line; falls back to a per-row measure if any field contains embedded newlines.
+    full_csv = df.to_csv(index=False)
+    body = full_csv.split("\n", 1)[1]
+    body_lines = body.splitlines(keepends=True)
+    if len(body_lines) == len(df):
+        row_bytes = [len(line.encode("utf-8")) for line in body_lines]
+    else:
+        row_bytes = [
+            len(df.iloc[i:i + 1].to_csv(index=False, header=False).encode("utf-8"))
+            for i in range(len(df))
+        ]
 
-    for start in range(0, total_rows, rows_per_chunk):
-        chunk = df.iloc[start : start + rows_per_chunk]
-        filename = f"agent_calls_part{part}.csv"
-        path = OUTPUT_DIR + filename
-        chunk.to_csv(path, index=False)
+    # Greedily pack rows into chunks that each stay under TARGET_BYTES.
+    chunks = []
+    start, size, i = 0, header_bytes, 0
+    while i < len(df):
+        if size + row_bytes[i] > TARGET_BYTES and i > start:
+            chunks.append((start, i))
+            start, size = i, header_bytes
+            continue
+        size += row_bytes[i]
+        i += 1
+    chunks.append((start, len(df)))
+
+    for part, (s, e) in enumerate(chunks, 1):
+        path = OUTPUT_DIR + f"agent_calls_part{part}.csv"
+        df.iloc[s:e].to_csv(path, index=False)
         size_mb = os.path.getsize(path) / (1024 * 1024)
-        print(f"Saved {len(chunk):,} rows to {filename} ({size_mb:.1f} MB)")
-        part += 1
+        print(f"Saved {e - s:,} rows to part{part} ({size_mb:.1f} MB)")
+        assert os.path.getsize(path) <= 10 * 1024 * 1024, f"{path} exceeds 10 MB cap"
 
     deploy_app()
